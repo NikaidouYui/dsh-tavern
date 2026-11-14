@@ -400,8 +400,11 @@ export function createConversationInitialization(options) {
 
   async function appendNativeOpening(sessionId, chat, card, readyTarget, recovering = false) {
     if (chat.nativeOpeningAppended === true) return
+    if (chat.forkedFrom && Array.isArray(chat.messages) && chat.messages.length > 0) return
     const text = openingText(chat, card)
     const target = readyTarget || await native.wait(sessionId)
+    // 分叉会话已有表面节点或回合事件时直接退出，避免竞态重入重复追加种子轨迹与开场白。
+    if (chat.forkedFrom && ((target.session?.surface?.nodes?.length || 0) > 0 || sessionEvents(target.session).some(event => event?.type === 'turn/start'))) return
     if (groupOfMode(chat.mode) === 'play' && chat.requestMode !== 'sillytavern') {
       const prefix = await trace.stage('nativeSnapshot', () => snapshots.ensure(chat, card))
       await trace.stage('nativePrefix', () => native.ensurePrefix(target.session, prefix))

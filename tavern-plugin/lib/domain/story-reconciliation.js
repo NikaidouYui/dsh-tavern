@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { repairNativeSurface, recordNativeSurfaceRepair, planNativeSurfaceRepair } from './native-surface-repair.js'
 import { reshadowRolledBackRounds } from './rollback-surface.js'
-import { sessionEvents } from './session-events.js'
+import { sessionEvents, withSuppressedEditLifecycle } from './session-events.js'
 import { inspectStoryAlignment, nativeStoryTurns } from './story-alignment.js'
 
 function str(value) {
@@ -66,7 +66,22 @@ export function createStoryReconciliation({ agentRegistry, sessionStore, chatFor
     try {
       // The session may have received a turn while the fork save was being written.
       assertBlankStoryForkTarget(sessionId, session)
-      const result = repairNativeSurface(session, chat, { repairId: randomUUID(), perRound: true })
+      const repairId = randomUUID()
+      const SessionClass = session?.constructor
+      if (typeof SessionClass?.fromRestore === 'function') {
+        // 先在隔离的 detached 副本上试跑按轮投影，验证全过程无异常后再写入活 Session，避免中途失败留下半成品事件。
+        const probe = SessionClass.fromRestore(
+          session.id,
+          structuredClone(sessionEvents(session)),
+          structuredClone(session.header),
+          session.inheritedEventCount ?? 0,
+          'detached'
+        )
+        repairNativeSurface(probe, chat, { repairId, perRound: true, seeded: true })
+      }
+      const result = withSuppressedEditLifecycle(session, () =>
+        repairNativeSurface(session, chat, { repairId, perRound: true, seeded: true })
+      )
       if (result.applied) await sessionStore.flush(session)
       await updateChat(chat.id, current => recordNativeSurfaceRepair(current, chat, result.anchors) ? current : undefined, { source: 'native-seed' })
       if (result.applied) console.warn('dsh-tavern: 故事分叉建原生上下文（' + reason + '），写入最近 ' + result.plan.rounds.length + ' 轮')

@@ -4,10 +4,10 @@ import { Session } from './fixtures/dsh-session-host.mjs'
 import { appendSessionEvent, sessionEvents } from '../tavern-plugin/lib/domain/session-events.js'
 import { replaceSessionSurface } from '../tavern-plugin/lib/domain/session-surface-mutations.js'
 import { roundAnchor } from '../tavern-plugin/lib/domain/round-anchor.js'
-import { locateRollbackSurface, projectedReplyTurns } from '../tavern-plugin/lib/domain/rollback-surface.js'
+import { locateRollbackSurface, projectedReplyTurns, surfaceTurnOfSeq } from '../tavern-plugin/lib/domain/rollback-surface.js'
 import { nativeOpeningMessageId } from '../tavern-plugin/lib/domain/native-opening.js'
-import { planNativeSurfaceRepair, recordNativeSurfaceRepair, repairNativeSurface } from '../tavern-plugin/lib/domain/native-surface-repair.js'
-import { planTranscriptRows } from '../tavern-plugin/lib/domain/transcript-row-plan.js'
+import { applyNativeSurfaceRepair, planNativeSurfaceRepair, recordNativeSurfaceRepair, repairNativeSurface } from '../tavern-plugin/lib/domain/native-surface-repair.js'
+import { planShowsRow, planStoryTurn, planTranscriptRows } from '../tavern-plugin/lib/domain/transcript-row-plan.js'
 
 const model = { kind: 'model', provider: 'test', model: 'test' }
 const textOf = event => (event.data.message?.content || event.data.content || []).map(block => block.text).join('')
@@ -350,7 +350,7 @@ test('分叉按轮投影到空白会话：每轮独立开启原生回合与步�
   assert.doesNotThrow(() => Session.fromRestore(session.id, sessionEvents(session), session.header, 0, 'detached'))
 })
 
-test('分叉按轮投影含独立输入或跳号轮次时，映射与幂等均保持一致', () => {
+test('分叉按轮投影含独立输入或跳号轮次时，映射、行计划、回退定位与重玩隔离均保持一致', () => {
   const base = Session.create('seeded-fork-gaps-base')
   const session = Session.create('seeded-fork-gaps', [], { ...base.header, id: 'seeded-fork-gaps', version: 4 })
   const chat = {
@@ -362,7 +362,7 @@ test('分叉按轮投影含独立输入或跳号轮次时，映射与幂等均�
       { role: 'assistant', turn: 5, text: '正文5' }
     ]
   }
-  const result = repairNativeSurface(session, chat, { repairId: 'seed-gaps', perRound: true })
+  const result = repairNativeSurface(session, chat, { repairId: 'seed-gaps', perRound: true, seeded: true })
   assert.equal(result.applied, true)
   recordNativeSurfaceRepair(chat, chat, result.anchors)
 
@@ -370,6 +370,169 @@ test('分叉按轮投影含独立输入或跳号轮次时，映射与幂等均�
   assert.deepEqual(events.filter(event => event.type === 'turn/start').map(event => event.data.turn), [1, 2, 3])
   assert.deepEqual(nodeTexts(session), ['', '开场', '悬空输入', '行动5', '正文5'])
   assert.equal(chat.regeneratedDshTurns[5], 3)
+  assert.equal(chat.regeneratedDshTurns[1], undefined)
   assert.equal(chat.messages.at(-1).nativeAnchor.turn, 3)
   assert.equal(planNativeSurfaceRepair({ chat, events, nodes: session.surface.nodes }).status, 'intact')
+  assert.doesNotThrow(() => Session.fromRestore(session.id, events, session.header, 0, 'detached'))
+
+  const plan = planTranscriptRows({ chat, events })
+  assert.equal(planShowsRow(plan, { turn: 1, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan, { turn: 1, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(plan, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan, { turn: 2, kind: 'assistant-step' }), false)
+  assert.equal(planShowsRow(plan, { turn: 3, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan, { turn: 3, kind: 'assistant-step' }), true)
+  assert.equal(planStoryTurn(plan, 3), 5)
+
+  const rollbackTarget = locateRollbackSurface({ events, nodes: session.surface.nodes, anchor: chat.messages.at(-1).nativeAnchor })
+  assert.equal(rollbackTarget.turn, 5)
+  assert.equal(surfaceTurnOfSeq(events, rollbackTarget.assistantSeq), 3)
+  assert.equal(textOf(events.find(event => event.seq === rollbackTarget.assistantSeq)), '正文5')
+
+  // 回退删掉第 5 轮及前置悬空输入后，老的播种轮次全部隐藏。
+  const rolledBackChat = { ...chat, messages: chat.messages.slice(0, 1) }
+  const rolledBackPlan = planTranscriptRows({ chat: rolledBackChat, events })
+  assert.equal(planShowsRow(rolledBackPlan, { turn: 1, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(rolledBackPlan, { turn: 2, kind: 'user' }), false)
+  assert.equal(planShowsRow(rolledBackPlan, { turn: 3, kind: 'user' }), false)
+  assert.equal(planShowsRow(rolledBackPlan, { turn: 3, kind: 'assistant-step' }), false)
+
+  // 回退后继续游玩直到在第 5 号原生轮同号重玩第 5 轮时，旧播种输入不再误显示，新第 5 轮正常显示。
+  const replayedChat = { ...rolledBackChat, messages: [...rolledBackChat.messages] }
+  play(session, replayedChat, 4, false)
+  play(session, replayedChat, 5, false)
+  const replayedPlan = planTranscriptRows({ chat: replayedChat, events: sessionEvents(session) })
+  assert.equal(planShowsRow(replayedPlan, { turn: 2, kind: 'user' }), false)
+  assert.equal(planShowsRow(replayedPlan, { turn: 3, kind: 'user' }), false)
+  assert.equal(planShowsRow(replayedPlan, { turn: 3, kind: 'assistant-step' }), false)
+  assert.equal(planShowsRow(replayedPlan, { turn: 5, kind: 'user' }), true)
+  assert.equal(planShowsRow(replayedPlan, { turn: 5, kind: 'assistant-step' }), true)
+})
+
+test('开场白前有独立输入触发轮号偏移时，recordNativeSurfaceRepair 不将开场白记入 regeneratedDshTurns', () => {
+  const base = Session.create('seeded-greeting-offset-base')
+  const session = Session.create('seeded-greeting-offset', [], { ...base.header, id: 'seeded-greeting-offset', version: 4 })
+  const chat = {
+    id: 'chat-greeting-offset', mode: 'story',
+    messages: [
+      { role: 'user', text: '开场前旁白' },
+      { role: 'user', text: '启动指令' },
+      { role: 'assistant', turn: 1, greeting: true, text: '开场正文' },
+      { role: 'user', text: '行动2' },
+      { role: 'assistant', turn: 2, text: '正文2' }
+    ]
+  }
+  const result = repairNativeSurface(session, chat, { repairId: 'seed-greeting-offset', perRound: true, seeded: true })
+  assert.equal(result.applied, true)
+  recordNativeSurfaceRepair(chat, chat, result.anchors)
+  assert.equal(chat.regeneratedDshTurns?.['1'], undefined)
+  assert.equal(chat.regeneratedDshTurns?.['2'], 3)
+
+  const plan = planTranscriptRows({ chat, events: sessionEvents(session) })
+  assert.equal(planShowsRow(plan, { turn: 1, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan, { turn: 2, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(plan, { turn: 3, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan, { turn: 3, kind: 'assistant-step' }), true)
+})
+
+test('存在未闭合原生回合时，perRound 修复拒绝写入并抛错', () => {
+  const { session, chat } = game(1)
+  appendSessionEvent(session, 'turn/start', { turn: 3 })
+  chat.messages.push({ role: 'user', text: '新增' }, { role: 'assistant', turn: 3, text: '新回复' })
+  assert.throws(
+    () => repairNativeSurface(session, chat, { repairId: 'open-turn-reject', perRound: true, seeded: true }),
+    /闭合/
+  )
+})
+
+test('perRound 为 true 且无保留轮次需清空失效尾部时，占位清空节点写入有效且可恢复', () => {
+  const { session, chat } = game(1)
+  const emptyChat = { ...chat, messages: [] }
+  const plan = planNativeSurfaceRepair({ chat: emptyChat, events: sessionEvents(session), nodes: session.surface.nodes })
+  assert.equal(plan.status, 'full')
+  assert.equal(plan.rounds.length, 0)
+  const applied = applyNativeSurfaceRepair(session, emptyChat, plan, { repairId: 'clear-tail', perRound: true, seeded: true })
+  assert.equal(applied.applied, true)
+  const events = sessionEvents(session)
+  const emptyEvent = events.at(-3)
+  assert.equal(emptyEvent.type, 'assistant/message')
+  assert.equal(emptyEvent.data.turn, events.at(-1).data.turn)
+  assert.doesNotThrow(() => Session.fromRestore(session.id, events, session.header, 0, 'detached'))
+})
+
+test('无 turn 字段旧存档按轮播种与回退时，行计划准确推断并保持一致', () => {
+  const base = Session.create('seeded-legacy-no-turn-base')
+  const session = Session.create('seeded-legacy-no-turn', [], { ...base.header, id: 'seeded-legacy-no-turn', version: 4 })
+  const chat = {
+    id: 'chat-legacy-no-turn', mode: 'story',
+    messages: [
+      { role: 'assistant', greeting: true, text: '开场' },
+      { role: 'user', text: '第2轮输入' },
+      { role: 'assistant', text: '第2轮正文' },
+      { role: 'user', text: '第3轮输入' },
+      { role: 'assistant', text: '第3轮正文' }
+    ]
+  }
+  const result = repairNativeSurface(session, chat, { repairId: 'seed-legacy', perRound: true, seeded: true })
+  assert.equal(result.applied, true)
+  const events = sessionEvents(session)
+  const plan = planTranscriptRows({ chat, events })
+  for (const turn of [1, 2, 3]) {
+    assert.equal(planShowsRow(plan, { turn, kind: 'assistant-step' }), true)
+  }
+  assert.equal(planShowsRow(plan, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan, { turn: 3, kind: 'user' }), true)
+
+  // 回退掉第 3 轮后，第 3 轮输入与回复同时隐藏。
+  const rolledBack = { ...chat, messages: chat.messages.slice(0, 3) }
+  const backPlan = planTranscriptRows({ chat: rolledBack, events })
+  assert.equal(planShowsRow(backPlan, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(backPlan, { turn: 2, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(backPlan, { turn: 3, kind: 'user' }), false)
+  assert.equal(planShowsRow(backPlan, { turn: 3, kind: 'assistant-step' }), false)
+})
+
+test('分叉含多条前置 standalone 与末尾 standalone 输入时，部分回退及后续游玩显隐准确', () => {
+  const base = Session.create('seeded-multi-standalone-base')
+  const session = Session.create('seeded-multi-standalone', [], { ...base.header, id: 'seeded-multi-standalone', version: 4 })
+  const chat = {
+    id: 'chat-multi-standalone', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场' },
+      { role: 'user', text: '前置1' },
+      { role: 'user', text: '前置2' },
+      { role: 'user', text: '正式4' },
+      { role: 'assistant', turn: 4, text: '正文4' },
+      { role: 'user', text: '末尾悬空' }
+    ]
+  }
+  const result = repairNativeSurface(session, chat, { repairId: 'seed-multi-standalone', perRound: true, seeded: true })
+  assert.equal(result.applied, true)
+  const events = sessionEvents(session)
+  // 轮次分配：1=开场, 2=前置1, 3=前置2, 4=正式4+正文4, 5=末尾悬空
+  const fullPlan = planTranscriptRows({ chat, events })
+  assert.equal(planShowsRow(fullPlan, { turn: 1, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(fullPlan, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(fullPlan, { turn: 3, kind: 'user' }), true)
+  assert.equal(planShowsRow(fullPlan, { turn: 4, kind: 'user' }), true)
+  assert.equal(planShowsRow(fullPlan, { turn: 4, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(fullPlan, { turn: 5, kind: 'user' }), true)
+
+  // 回退删掉末尾悬空与一条前置 standalone（模拟存档中 story 4 仅余 2 条输入）：
+  const trimmedChat = { ...chat, messages: [chat.messages[0], chat.messages[2], chat.messages[3], chat.messages[4]] }
+  const trimmedPlan = planTranscriptRows({ chat: trimmedChat, events })
+  assert.equal(planShowsRow(trimmedPlan, { turn: 2, kind: 'user' }), false)
+  assert.equal(planShowsRow(trimmedPlan, { turn: 3, kind: 'user' }), true)
+  assert.equal(planShowsRow(trimmedPlan, { turn: 4, kind: 'user' }), true)
+  assert.equal(planShowsRow(trimmedPlan, { turn: 4, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(trimmedPlan, { turn: 5, kind: 'user' }), false)
+
+  // 继续正常玩一轮（nativeTurn 6 发出并完成）后，末尾悬空输入依然展示且新轮正常展示。
+  const playedChat = { ...chat, messages: [...chat.messages] }
+  play(session, playedChat, 6, false)
+  const playedPlan = planTranscriptRows({ chat: playedChat, events: sessionEvents(session) })
+  assert.equal(planShowsRow(playedPlan, { turn: 5, kind: 'user' }), true)
+  assert.equal(planShowsRow(playedPlan, { turn: 6, kind: 'user' }), true)
+  assert.equal(planShowsRow(playedPlan, { turn: 6, kind: 'assistant-step' }), true)
 })

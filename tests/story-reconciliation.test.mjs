@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Session } from './fixtures/dsh-session-host.mjs'
-import { appendSessionEvent, sessionEvents } from '../tavern-plugin/lib/domain/session-events.js'
+import { appendSessionEvent, isEditLifecycleSuppressed, sessionEvents } from '../tavern-plugin/lib/domain/session-events.js'
+import { createSessionSurfaceMutator } from '../tavern-plugin/lib/domain/session-surface-mutations.js'
 import { createStoryReconciliation } from '../tavern-plugin/lib/domain/story-reconciliation.js'
 
 const reply = (id, turn) => ({ turn, step: 1, message: { id, role: 'assistant', content: [{ type: 'text', text: id }], source: { kind: 'model', provider: 'test', model: 'test' } } })
@@ -76,4 +77,113 @@ test('seedNativeStory 为故事分叉按轮初始化独立原生回合，轨迹�
   assert.equal(saved.messages[4].nativeAnchor.turn, 3)
   const alignment = await service.reconcileWhenIdle('story')
   assert.equal(alignment.aligned, true)
+})
+
+test('seedNativeStory 预校验副本写入失败时，活 Session 无部分残留污染并标记 stale', async () => {
+  const base = Session.create('story')
+  const session = Session.create('story', [], { ...base.header, id: 'story', version: 4 })
+  let probeCalls = 0
+  session.constructor = {
+    fromRestore(...args) {
+      probeCalls++
+      const probe = Session.fromRestore(...args)
+      const origAppend = probe.append.bind(probe)
+      let turnStarts = 0
+      probe.append = (type, ...rest) => {
+        if (type === 'turn/start' && ++turnStarts === 2) throw new Error('模拟第 2 轮写入失败')
+        return origAppend(type, ...rest)
+      }
+      return probe
+    }
+  }
+  let liveAppendCalls = 0
+  const origLiveAppend = session.append.bind(session)
+  session.append = (...args) => { liveAppendCalls++; return origLiveAppend(...args) }
+
+  const beforeEvents = JSON.stringify(sessionEvents(session))
+  const beforeNodes = [...session.surface.nodes]
+  const sessionStore = new Map([['story', session]])
+  sessionStore.flush = async () => {}
+  let saved = {
+    id: 'game-fork-fail', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场白' },
+      { role: 'user', text: '第一句' },
+      { role: 'assistant', turn: 2, text: '第一段正文' }
+    ]
+  }
+  const service = createStoryReconciliation({
+    agentRegistry: new Map(),
+    sessionStore,
+    chatForSession: async id => id === 'story' ? structuredClone(saved) : undefined,
+    chatSliceForSession: async () => null,
+    async updateChat(_id, mutate) { const next = mutate(structuredClone(saved)); if (next) saved = next; return saved },
+    turns: { finalize: async () => assert.fail('nothing to adopt') }
+  })
+
+  const result = await service.seedNativeStory('story', session, 'probe-fail')
+  assert.equal(result, null)
+  assert.equal(probeCalls, 1)
+  assert.equal(liveAppendCalls, 0)
+  assert.equal(JSON.stringify(sessionEvents(session)), beforeEvents)
+  assert.deepEqual(session.surface.nodes, beforeNodes)
+  assert.equal(saved.nativeSync?.status, 'stale')
+  assert.equal(isEditLifecycleSuppressed(session), false)
+})
+
+test('seedNativeStory 批量按轮播种期间开启静默编辑抑制标记，完成后立即撤销', async () => {
+  const base = Session.create('story')
+  const session = Session.create('story', [], { ...base.header, id: 'story', version: 4 })
+  const seenStates = []
+  const rawAppend = session.append.bind(session)
+  session.append = (type, data, ...rest) => {
+    if (type === 'turn/start' || type === 'turn/end') {
+      seenStates.push([type, data?.turn, isEditLifecycleSuppressed(session)])
+    }
+    return rawAppend(type, data, ...rest)
+  }
+
+  const sessionStore = new Map([['story', session]])
+  sessionStore.flush = async () => {}
+  let saved = {
+    id: 'game-batch', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场白' },
+      { role: 'user', text: '输入2' },
+      { role: 'assistant', turn: 2, text: '正文2' },
+      { role: 'user', text: '输入3' },
+      { role: 'assistant', turn: 3, text: '正文3' },
+      { role: 'user', text: '输入4' },
+      { role: 'assistant', turn: 4, text: '正文4' }
+    ]
+  }
+  const service = createStoryReconciliation({
+    agentRegistry: new Map(),
+    sessionStore,
+    chatForSession: async id => id === 'story' ? structuredClone(saved) : undefined,
+    chatSliceForSession: async () => null,
+    async updateChat(_id, mutate) { const next = mutate(structuredClone(saved)); if (next) saved = next; return saved },
+    turns: { finalize: async () => assert.fail('nothing to adopt') }
+  })
+
+  const seeded = await service.seedNativeStory('story', session, 'batch-suppress')
+  assert.equal(seeded.applied, true)
+  assert.equal(isEditLifecycleSuppressed(session), false)
+  assert.equal(seenStates.length, 8)
+  assert.ok(seenStates.every(([_type, _turn, suppressed]) => suppressed === true))
+
+  // 普通单次 surface 编辑不置抑制标记，保留原有前景结算生命周期。
+  const singleStates = []
+  session.append = (type, data, ...rest) => {
+    if (type === 'turn/start' || type === 'turn/end') singleStates.push(isEditLifecycleSuppressed(session))
+    return rawAppend(type, data, ...rest)
+  }
+  const mutator = createSessionSurfaceMutator(session, sessionEvents(session))
+  mutator.editStep((turn, step) => {
+    mutator.append('assistant/message', { turn, step, message: {
+      id: 'single-edit', role: 'assistant', content: [{ type: 'text', text: '单次编辑' }],
+      source: { kind: 'model', provider: 'dsh-tavern', model: 'native-repair' }
+    } }, { surfaceOp: 'append', sourceEventSeqs: [] })
+  })
+  assert.deepEqual(singleStates, [false, false])
 })

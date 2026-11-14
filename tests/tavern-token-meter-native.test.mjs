@@ -129,3 +129,67 @@ test('撤销回退恢复带 usage 的模型正文后仍可统计，历史和用�
   assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
   assert.equal(JSON.stringify(session.snapshotEvents()), before)
 })
+
+test('分叉按轮播种后原生 Token Meter 准确计量且 BasicCompactionEngine 可正常压缩', native, async t => {
+  const { ctx } = await harness(t)
+  const { repairNativeSurface } = await import('../tavern-plugin/lib/domain/native-surface-repair.js')
+  const { ensureSessionStablePrefix } = await import('../tavern-plugin/lib/domain/session-stable-prefix.js')
+  const { BasicCompactionEngine } = await import(new URL('../../dsh-compaction-basic/lib/index.js', pathToFileURL(process.env.DSH_BOOT_MODULE)))
+
+  const fixed = '固定角色设定与常驻世界书规则。'
+  let summarizeCalls = 0
+  let summarizedText = ''
+  class FixtureCompaction extends BasicCompactionEngine {
+    async summarize(input) {
+      summarizeCalls++
+      summarizedText = input.messages.map(m => (m.content || []).map(b => b.text || '').join('')).join('\n')
+      return { summary: [{ type: 'text', text: '分叉历史压缩摘要。' }], provider: 'fixture', model: 'summary', maxTokens: 128 }
+    }
+  }
+  const engine = new FixtureCompaction(ctx, { auto: false })
+  t.after(installTavernTokenMeter(ctx.tokenMeter))
+
+  const session = ctx.sessions.create('seeded-fork-meter', { meta: { agentPreset: 'tavern' } })
+  await ensureSessionStablePrefix(session, fixed)
+  session.append('request/header', { header: { config: { provider: 'fixture', model: 'summary' }, ...(session.header.version < 3 ? { system: fixed } : {}) }, reason: 'initial' })
+  if (session.header.version >= 3) {
+    const head = session.surface.nodes[0]
+    session.append('system/message', { message: { id: 'assembled', role: 'system', content: [{ type: 'text', text: fixed }], source: { kind: 'system-prompt' } } }, { surfaceOp: { op: 'replace', startSeq: head, endSeq: head }, sourceEventSeqs: [head] })
+  }
+  closeOpeningTurn(session)
+
+  const chat = {
+    id: 'chat-fork-meter', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场剧情。' },
+      { role: 'user', text: '前往酒馆调查线索' },
+      { role: 'assistant', turn: 2, text: '酒馆第一轮长正文。'.repeat(120) },
+      { role: 'user', text: '继续追问酒保细节' },
+      { role: 'assistant', turn: 3, text: '酒馆第二轮长正文。'.repeat(120) }
+    ]
+  }
+  const seeded = repairNativeSurface(session, chat, { repairId: 'seed-fork-meter', perRound: true, seeded: true })
+  assert.equal(seeded.applied, true)
+
+  const measuredBefore = ctx.tokenMeter.measure(session)
+  assert.ok(measuredBefore.totalTokens > 0)
+  assert.equal(measuredBefore.nodes.some(node => node.tokens > 0), true)
+
+  // 追加一轮后续正常游玩，然后触发压缩验证所有按轮播种消息被计入且不损坏历史。
+  const nextTurn = 5
+  session.append('turn/start', { turn: nextTurn })
+  session.append('step/start', { turn: nextTurn, step: 1 })
+  session.append('user/message', { id: 'tail-user', role: 'user', content: [{ type: 'text', text: '离开酒馆前往港口' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: nextTurn, step: 1 })
+  session.append('turn/end', { turn: nextTurn, reason: { kind: 'completed' } })
+
+  const beforeEvents = session.snapshotEvents()
+  const signal = new AbortController().signal
+  const compacted = await engine.compactNow({ session, options: {}, runMaintenance: fn => fn(signal) }, signal)
+  assert.ok(compacted)
+  assert.equal(summarizeCalls, 1)
+  assert.ok(summarizedText.includes('酒馆第一轮长正文'))
+  assert.ok(summarizedText.includes('酒馆第二轮长正文'))
+  assert.deepEqual(session.snapshotEvents().slice(0, beforeEvents.length), beforeEvents)
+  assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
+})

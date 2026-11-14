@@ -43,6 +43,13 @@ export function createTranscriptFold() {
   const rounds = new Map() // story -> assistant floors that hold its reply
   const inputs = new Map() // story -> user floors that hold its input
   const openingInputs = new Set() // legacy openings whose input exists only in the native log
+  // 故事分叉按轮播种出的原生轮次：记录各轮所属的故事轮号、主绘原生轮与从后往前的输入偏移。
+  const seededTurns = new Map()
+  const seededByStory = new Map()
+  const seededStories = new Set()
+  let pendingSeededStandalone = []
+  let pendingSeededRound = null
+  let tailPendingInputs = 0
   // Derived.
   const replyStories = new Map() // native turn -> rounds drawn there
   const dirty = new Set()
@@ -54,6 +61,25 @@ export function createTranscriptFold() {
   let exceptions = turnFields.from({})
 
   const replyOf = story => drawn.get(story) ?? story
+  function markSeededDirty(story) {
+    const group = seededByStory.get(story)
+    if (!group) return
+    for (const turn of group) dirty.add(turn)
+  }
+  function bindSeededRound(story, ownerTurn, turnsInGroup) {
+    if (!Number.isSafeInteger(story) || story < 1) return
+    seededStories.add(story)
+    let group = seededByStory.get(story)
+    if (!group) seededByStory.set(story, group = new Set())
+    const total = turnsInGroup.length
+    for (let index = 0; index < total; index++) {
+      const nativeTurn = turnsInGroup[index]
+      if (!Number.isSafeInteger(nativeTurn) || nativeTurn < 1) continue
+      seededTurns.set(nativeTurn, { story, ownerTurn, offset: total - 1 - index })
+      group.add(nativeTurn)
+      dirty.add(nativeTurn)
+    }
+  }
   function link(story, turn, add) {
     let set = replyStories.get(turn)
     if (add) { if (!set) replyStories.set(turn, set = new Set()); set.add(story) }
@@ -66,10 +92,12 @@ export function createTranscriptFold() {
     if (isRound) link(story, replyOf(story), false)
     drawn.set(story, turn)
     if (isRound) link(story, turn, true)
+    markSeededDirty(story)
+    if (seededStories.has(story)) dirty.add(story)
   }
   function addRound(story) {
     rounds.set(story, (rounds.get(story) || 0) + 1)
-    if (rounds.get(story) === 1) { link(story, replyOf(story), true); dirty.add(story) }
+    if (rounds.get(story) === 1) { link(story, replyOf(story), true); dirty.add(story); markSeededDirty(story) }
   }
   function removeRound(story) {
     const count = (rounds.get(story) || 0) - 1
@@ -77,16 +105,19 @@ export function createTranscriptFold() {
     rounds.delete(story)
     link(story, replyOf(story), false)
     dirty.add(story)
+    markSeededDirty(story)
   }
   function addInput(story) {
     inputs.set(story, (inputs.get(story) || 0) + 1)
     dirty.add(story)
+    markSeededDirty(story)
   }
   function removeInput(story) {
     const count = (inputs.get(story) || 0) - 1
     if (count > 0) inputs.set(story, count)
     else inputs.delete(story)
     dirty.add(story)
+    markSeededDirty(story)
   }
   function removeFloor(floor) {
     if (floor.openingInput) {
@@ -127,6 +158,15 @@ export function createTranscriptFold() {
     stepReplies.delete(key)
   }
 
+  function flushPendingSeededRound(storyHint = null) {
+    if (!pendingSeededRound) return
+    const { nativeTurn, story } = pendingSeededRound
+    pendingSeededRound = null
+    const resolvedStory = story || (Number.isSafeInteger(storyHint) && storyHint > 0 ? storyHint : nativeTurn)
+    bindSeededRound(resolvedStory, nativeTurn, [...pendingSeededStandalone, nativeTurn])
+    pendingSeededStandalone = []
+  }
+
   /** Fold log events from index `from` (events[i].seq === i for a session log). */
   function addEvents(events, from = folded + 1) {
     // A log, or a tail of one: seqs are contiguous, so an event sits at seq - first seq.
@@ -137,6 +177,7 @@ export function createTranscriptFold() {
       folded = index
       if (!event) continue
       if (event.type === 'turn/start') {
+        flushPendingSeededRound()
         // A player's message queued before its turn starts (the inbox splices it in) opens it.
         if (last !== null) dirty.add(last)
         last = Number(event.data?.turn); running = true; playerInput = queuedInput; queuedInput = false; ended = ''
@@ -146,6 +187,7 @@ export function createTranscriptFold() {
         continue
       }
       if (event.type === 'turn/end') {
+        flushPendingSeededRound()
         running = false
         ended = String(event.data?.reason?.kind || '')
         for (const key of [...pending.keys()]) if (key.startsWith(event.data?.turn + ':')) flushStep(key)
@@ -154,6 +196,20 @@ export function createTranscriptFold() {
       if (event.type === 'step/end') { flushStep(event.data?.turn + ':' + event.data?.step); continue }
       if (event.type === 'user/message' && event.surfaceOp === 'append' && event.data?.source?.kind === 'user' && !event.data?.source?.repair) {
         if (running) { playerInput = true; inputSeq = event.seq; inputTurns.add(last); dirty.add(last) } else { queuedInput = true; queuedSeq = event.seq }
+        continue
+      }
+      if (event.type === 'user/message' && event.data?.source?.repair?.seeded === true && last !== null) {
+        const explicitStory = Number(event.data.source.repair.storyTurn)
+        const story = Number.isSafeInteger(explicitStory) && explicitStory > 0 ? explicitStory : null
+        if (event.data.source.repair.standalone === true) {
+          if (story !== null) bindSeededRound(story, null, [last])
+          else {
+            pendingSeededStandalone.push(last)
+            dirty.add(last)
+          }
+        } else {
+          pendingSeededRound = { nativeTurn: last, story }
+        }
         continue
       }
       if (event.type !== 'assistant/message') continue
@@ -168,6 +224,19 @@ export function createTranscriptFold() {
         gameReplies.set(event.seq, turn); dirty.add(turn)
       }
       const story = storyOf(event)
+      const assistantTurn = Number(event.data?.turn)
+      const repairSource = event.data?.message?.source
+      if (pendingSeededRound && pendingSeededRound.nativeTurn === assistantTurn) {
+        flushPendingSeededRound(story)
+      } else if (pendingSeededStandalone.length > 0 && textOf(event.data?.message) !== '' && Number.isSafeInteger(assistantTurn) && assistantTurn > 0) {
+        const isNativeRepair = repairSource?.provider === 'dsh-tavern' && repairSource?.model === 'native-repair'
+        if (isNativeRepair || playerInput) {
+          const resolvedStory = Number.isSafeInteger(story) && story > 0 ? story : assistantTurn
+          const standaloneGroup = playerInput && !isNativeRepair ? [...pendingSeededStandalone, null] : pendingSeededStandalone
+          bindSeededRound(resolvedStory, assistantTurn, standaloneGroup)
+          pendingSeededStandalone = []
+        }
+      }
       // A rollback replaces the model's surface from a round's input on: when that covers
       // the last turn's player input, the turn is rolled back, not failed and awaiting retry.
       if (event.surfaceOp?.op === 'replace' && !(story > 0) && Number.isSafeInteger(inputSeq)) {
@@ -176,12 +245,15 @@ export function createTranscriptFold() {
       }
       if (isAppendReply(event)) {
         if (textOf(event.data?.message) === '') continue
+        if (playerInput && !(Number.isSafeInteger(story) && story > 0) && Number.isSafeInteger(assistantTurn) && seededStories.has(assistantTurn) && drawn.get(assistantTurn) !== assistantTurn) {
+          setDrawn(assistantTurn, assistantTurn)
+        }
         const key = stepKey(event)
         stepReplies.set(key, (stepReplies.get(key) || 0) + 1)
         // A rewrite appended as its own row (a repaired round) draws itself.
         if (Number.isSafeInteger(story) && story > 0) {
           if (!pending.has(key)) pending.set(key, [])
-          pending.get(key).push({ story, turn: Number(event.data?.turn) })
+          pending.get(key).push({ story, turn: assistantTurn })
         }
         continue
       }
@@ -190,7 +262,6 @@ export function createTranscriptFold() {
       // rewrite keeps that round's existing drawable row; later appends are assigned by
       // flushStep. Applying the regeneration range-tail rule here can bind the opening
       // to an arbitrary reply that merely happens to be the span's last append.
-      const repairSource = event.data?.message?.source
       if (repairSource?.provider === 'dsh-tavern' && repairSource?.model === 'native-repair') continue
       // A replacement is model-only: the round shows at the drawable row it covers —
       // its tail when that is a reply append (the projection's copy, or the attempt's
@@ -236,6 +307,15 @@ export function createTranscriptFold() {
         linkPendingInputs(floor.story)
       } else if (floor.role === 'user' && floor.story !== null) addInput(floor.story)
     }
+    let nextTailInputs = 0
+    for (let index = floors.length - 1; index >= 0; index--) {
+      if (floors[index].role === 'assistant') break
+      if (floors[index].role === 'user' && floors[index].story === null) nextTailInputs++
+    }
+    if (nextTailInputs !== tailPendingInputs) {
+      tailPendingInputs = nextTailInputs
+      for (const turn of pendingSeededStandalone) dirty.add(turn)
+    }
   }
 
   // The native turn the save does not hold but the page must keep, as the host draws it:
@@ -269,6 +349,19 @@ export function createTranscriptFold() {
     const candidates = [...replacing].filter(candidate => Number(candidate) !== Number(turn))
     return candidates.length === 1 ? Number(candidates[0]) : 0
   }
+  function seededInputVisible(turn) {
+    const seeded = seededTurns.get(turn)
+    if (seeded) {
+      const boundMatch = seeded.ownerTurn === null
+        ? (!drawn.has(seeded.story) || !rounds.has(seeded.story))
+        : replyOf(seeded.story) === seeded.ownerTurn
+      return boundMatch && (inputs.get(seeded.story) || 0) >= 1 + seeded.offset
+    }
+    const tailIndex = pendingSeededStandalone.indexOf(turn)
+    if (tailIndex < 0) return false
+    const tailOffset = pendingSeededStandalone.length - 1 - tailIndex
+    return tailPendingInputs >= 1 + tailOffset
+  }
   function classify(turn) {
     if ([...gameReplies.values()].includes(turn)) return { input: 0, reply: 1 }
     // A regeneration's attempt (the save says one is under way) has no player's input,
@@ -286,12 +379,14 @@ export function createTranscriptFold() {
     // The old reply a regeneration is replacing: the round shows its input only, so the
     // page does not read as two replies or as a regeneration that did nothing. The save
     // may hold the round out while it regenerates: the player's input still shows.
-    if (replacing.has(turn)) return { input: inputs.has(turn) || inputTurns.has(turn) ? 1 : 0, reply: 0 }
+    if (replacing.has(turn)) return { input: inputs.has(turn) || inputTurns.has(turn) || seededInputVisible(turn) ? 1 : 0, reply: 0 }
     // A failed turn's player input adopted by a retry: the round's reply is drawn in
     // another native turn, but hiding this turn whole would take the player's own words
     // with it. Draw his message only; the residue and trigger card stay hidden.
     if (keepInput.has(turn) && !rounds.has(turn) && !replyStories.has(turn)) return { input: 1, reply: 0, kept: 1 }
-    const input = inputs.has(turn) || openingInputs.has(turn)
+    const input = seededTurns.has(turn) || pendingSeededStandalone.includes(turn)
+      ? seededInputVisible(turn)
+      : openingInputs.has(turn) || (inputs.has(turn) && (!seededStories.has(turn) || drawn.get(turn) === turn))
     const stories = replyStories.get(turn)
     const reply = Boolean(stories?.size)
     const story = reply ? Math.max(...stories) : turn

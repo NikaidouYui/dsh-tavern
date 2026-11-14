@@ -69,6 +69,19 @@ export function releaseOpeningTurn(session, agent) {
 // Turns Tavern opened for its own writes (withSurfaceEditTurn, a surface mutation's edit
 // step), per session: not the player's.
 const surfaceEditTurns = new WeakMap()
+const suppressedEditLifecycles = new WeakSet()
+
+/** 批量抑制非必要的编辑生命周期副作用（如故事分叉批量播种期间）。 */
+export function withSuppressedEditLifecycle(session, work) {
+  if (!session || typeof session !== 'object' || suppressedEditLifecycles.has(session)) return work()
+  suppressedEditLifecycles.add(session)
+  try { return work() } finally { suppressedEditLifecycles.delete(session) }
+}
+
+/** 当前会话的编辑事件是否处于静默初始化抑制期。 */
+export function isEditLifecycleSuppressed(session) {
+  return Boolean(session && suppressedEditLifecycles.has(session))
+}
 
 /** Note a turn Tavern opens only to carry its own write; call before its turn/start. */
 export function markSurfaceEditTurn(session, turn) {

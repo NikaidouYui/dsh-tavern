@@ -1,4 +1,4 @@
-import { sessionEvents } from './session-events.js'
+import { openTurnStep, sessionEvents } from './session-events.js'
 import { createSessionSurfaceMutator } from './session-surface-mutations.js'
 import { createRoundAnchorResolver, roundAnchor, validAnchor } from './round-anchor.js'
 import { isCompactionCheckpoint } from './compaction-checkpoint.js'
@@ -25,7 +25,7 @@ function chatRounds(chat) {
       // Only the last adjacent user can pair with the next reply. Earlier users are
       // story messages in their own right, not lines to merge into that reply's input.
       if (pending) rounds.push({ ...pending, standalone: true })
-      pending = { messageIndex: index, userText: String(message.text ?? '') }
+      pending = { messageIndex: index, turn: Number(message.turn) || 0, userText: String(message.text ?? '') }
       continue
     }
     if (message?.role !== 'assistant') continue
@@ -188,10 +188,12 @@ export function planNativeSurfaceRepair({ chat, events = [], nodes = [] }) {
 }
 
 /** Write a plan onto the surface: one replacement over the stale tail, then appends. */
-export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRound = false }) {
+export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRound = false, seeded = false }) {
   if (plan.status === 'intact') return { applied: false, anchors: [] }
   if (!/^[\w-]{1,100}$/.test(String(repairId || ''))) throw new Error('修复标识无效')
-  const mutator = createSessionSurfaceMutator(session, sessionEvents(session))
+  const events = sessionEvents(session)
+  if (perRound && openTurnStep(events).turn !== null) throw new Error('按轮次修复原生表面前必须先闭合未结束回合')
+  const mutator = createSessionSurfaceMutator(session, events)
   const targets = (session.surface?.nodes || []).slice(plan.keep)
   let pending = targets.length > 0
   function write(type, data) {
@@ -216,8 +218,17 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
   function writeRound(index, round, stepTurn, step) {
     const id = `tavern-native-repair:${repairId}:${index}`
     const turn = round.turn
+    const roundTurn = Number(turn)
+    const repairMarker = seeded
+      ? {
+          id: repairId,
+          seeded: true,
+          ...(round.standalone ? { standalone: true } : {}),
+          ...(Number.isSafeInteger(roundTurn) && roundTurn > 0 ? { storyTurn: roundTurn } : {}),
+        }
+      : { id: repairId }
     const input = round.userText === null ? null : write('user/message', { id: id + ':input', role: 'user',
-      content: [{ type: 'text', text: round.userText }], source: { kind: 'user', repair: { id: repairId } } })
+      content: [{ type: 'text', text: round.userText }], source: { kind: 'user', repair: repairMarker } })
     if (round.standalone) return
     const reply = write('assistant/message', { turn: stepTurn, step, message: { id: round.greeting ? nativeOpeningMessageId(chat.id) : id + ':reply',
       role: 'assistant', content: [{ type: 'text', text: round.replyText }], source: storySource(turn) } })
@@ -248,7 +259,7 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
       writeSystemHead(turn, step)
       for (const [index, round] of plan.rounds.entries()) writeRound(index, round, turn, step)
       // A stale tail with nothing to write in its place: shadow it with an empty node.
-      if (pending) write('assistant/message', { turn: 0, step: 1, message: { id: `tavern-native-repair:${repairId}:empty`, role: 'assistant', content: [], source } })
+      if (pending) write('assistant/message', { turn, step, message: { id: `tavern-native-repair:${repairId}:empty`, role: 'assistant', content: [], source } })
     })
   }
   return { applied: true, anchors }
@@ -283,7 +294,7 @@ export function recordNativeSurfaceRepair(current, repaired, anchors) {
     }
     const storyTurn = Number(read?.turn)
     const nativeTurn = Number(replyTurn) || Number(anchor?.turn)
-    if (Number.isSafeInteger(storyTurn) && storyTurn > 0 && Number.isSafeInteger(nativeTurn) && nativeTurn > 0) {
+    if (!read?.greeting && Number.isSafeInteger(storyTurn) && storyTurn > 0 && Number.isSafeInteger(nativeTurn) && nativeTurn > 0) {
       const key = String(storyTurn)
       const mappings = current.regeneratedDshTurns && typeof current.regeneratedDshTurns === 'object' && !Array.isArray(current.regeneratedDshTurns)
         ? current.regeneratedDshTurns : {}

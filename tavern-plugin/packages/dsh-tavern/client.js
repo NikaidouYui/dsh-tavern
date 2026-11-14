@@ -282,7 +282,7 @@ window.__ModuleLoader__.load({
       return h(React.Fragment, null,
         version && version !== 'unknown' ? `v${version} · ` : null,
         /^[0-9a-f]{40}$/i.test(commit || '')
-          ? h('a', { href: `https://github.com/flizzywine/dsh-tavern/commit/${commit}`, target: '_blank', rel: 'noreferrer', title: commit }, h('code', null, commit.slice(0, 8)))
+          ? h('a', { href: `https://github.com/NikaidouYui/dsh-tavern/commit/${commit}`, target: '_blank', rel: 'noreferrer', title: commit }, h('code', null, commit.slice(0, 8)))
           : t('unknownBuild'))
     }
 

@@ -36,7 +36,7 @@ export function listLegacyPlugins(profileDir) {
     if (name.startsWith('@deepseek-ai/') || TAVERN_OWN.has(name) || managed.has(name)) continue
     const pkg = installedPackage(profileDir, name)
     const repo = pkg?.repository?.url
-    if (repo === 'git+https://github.com/flizzywine/dsh-tavern.git' && (pkg.license === 'MIT' || pkg.dshTavern?.profileHandoff === true) && pkg.dsh?.bundle?.patch === './cordis.patch.yml') continue
+    if (repo === 'git+https://github.com/NikaidouYui/dsh-tavern.git' && (pkg.license === 'MIT' || pkg.dshTavern?.profileHandoff === true) && pkg.dsh?.bundle?.patch === './cordis.patch.yml') continue
     const bundle = bundles.has(name)
     if (!bundle && !(pkg && pkg.dsh)) continue
     const spec = name in dependencies ? String(dependencies[name]) : null

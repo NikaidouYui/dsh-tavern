@@ -174,8 +174,8 @@ def prepare(source, apk, destination, offline=None, application_id=APPLICATION_I
     if source_ref != 'main':
         # 测试版跟随自己的分支：内置快照与之后的压缩包更新都不能悄悄回到 main。
         for anchor, replacement in (
-            ('DEFAULT_TARBALL_URL="https://codeload.github.com/flizzywine/dsh-tavern/tar.gz/refs/heads/main"',
-             'DEFAULT_TARBALL_URL="https://codeload.github.com/flizzywine/dsh-tavern/tar.gz/refs/heads/'
+            ('DEFAULT_TARBALL_URL="https://codeload.github.com/NikaidouYui/dsh-tavern/tar.gz/refs/heads/main"',
+             'DEFAULT_TARBALL_URL="https://codeload.github.com/NikaidouYui/dsh-tavern/tar.gz/refs/heads/'
              + source_ref + '"'),
             ('BRANCH="${DSH_TAVERN_BRANCH:-main}"', 'BRANCH="${DSH_TAVERN_BRANCH:-' + source_ref + '}"'),
             # CDN 兜底读的是 @runtime-archive-main 清单（main 分支内容），测试版一旦

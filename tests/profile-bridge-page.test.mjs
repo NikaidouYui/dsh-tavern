@@ -192,7 +192,7 @@ test('官方酒馆启动器按提交检查同版本更新，并跟踪安装到�
     checkResult = { ...latest, phase: 'update-available' }
     await page.act(async () => namedButton(page, '检查更新').click())
     assert.match(page.text(), /最新发布v3\.2\.8 · abcdef12发现新版本/)
-    assert.equal([...page.dom.window.document.querySelectorAll('.pb-builds a')].at(-1).href, `https://github.com/flizzywine/dsh-tavern/commit/${latest.latestCommit}`)
+    assert.equal([...page.dom.window.document.querySelectorAll('.pb-builds a')].at(-1).href, `https://github.com/NikaidouYui/dsh-tavern/commit/${latest.latestCommit}`)
 
     await page.act(async () => {
       namedButton(page, '更新酒馆').click()

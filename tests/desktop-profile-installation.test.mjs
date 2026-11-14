@@ -58,10 +58,10 @@ test('从 NEXT 安装到官方桌面时保留旧 Profile 备份和酒馆数据',
   writeFileSync(path.join(r.desktop, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['official', 'dsh-tavern'] } } }))
   const installed = path.join(r.desktop, 'node_modules/dsh-tavern')
   mkdirSync(installed, { recursive: true })
-  const repository = { url: 'git+https://github.com/flizzywine/dsh-tavern.git' }
+  const repository = { url: 'git+https://github.com/NikaidouYui/dsh-tavern.git' }
   writeFileSync(path.join(installed, 'package.json'), JSON.stringify({ repository, dshTavern: { profileHandoff: true } }))
   mkdirSync(r.tavern)
-  const archive = `https://raw.githubusercontent.com/flizzywine/dsh-tavern/${'a'.repeat(40)}/dsh-tavern-bundle.tgz`
+  const archive = `https://raw.githubusercontent.com/NikaidouYui/dsh-tavern/${'a'.repeat(40)}/dsh-tavern-bundle.tgz`
   const oldManifest = JSON.stringify({ dependencies: { 'dsh-tavern-bundle': archive }, dsh: { profile: { bundles: ['dsh-tavern-bundle'] } } })
   writeFileSync(path.join(r.tavern, 'package.json'), oldManifest)
   mkdirSync(path.join(r.tavern, 'node_modules/dsh-tavern-bundle'), { recursive: true })

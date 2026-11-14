@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "revision": "dc2a7d8d41d2563769b3f027a0944d346d7fe165",
-  "releaseSequence": 1640,
+  "revision": "05d864f176d832251e37af4934e2d55881ac3a41",
+  "releaseSequence": 1641,
   "version": "3.3.0",
   "files": [
     {
@@ -21,8 +21,8 @@
     },
     {
       "path": "android/apk/prepare.py",
-      "sha256": "dfe6168d4e9eda126795ab48cb5203c608ca05c519a3230a973545b9f8e08f51",
-      "size": 22663
+      "sha256": "f550ab899d1b3b13014efef1e44cae507940268151c26ebd70c5bcc4f05c1ff0",
+      "size": 22665
     },
     {
       "path": "android/apk/README.md",
@@ -91,8 +91,8 @@
     },
     {
       "path": "android/setup.sh",
-      "sha256": "2ed1f257ad210f8e6279fb671a28cf11401b661e8dcfeb3f8ee094b4d71d122a",
-      "size": 20604
+      "sha256": "29170e2f966a41f282af53012bb3d02dad287967ba77a8ec23b7d07c05d23acc",
+      "size": 20608
     },
     {
       "path": "android/update.sh",
@@ -101,8 +101,8 @@
     },
     {
       "path": "bin/application-update.mjs",
-      "sha256": "b724ea5968e70b588b220894ed9dfb21750599c2b4c3278eceeec78a841e3693",
-      "size": 26669
+      "sha256": "57a27007be914226688df3d2ffa969c62fb022f0410f972c2e5df82744081600",
+      "size": 26670
     },
     {
       "path": "bin/build-image-client.mjs",
@@ -246,8 +246,8 @@
     },
     {
       "path": "bin/install-next-plugin.ps1",
-      "sha256": "777710be75a5ea58ad5245f252c76acc6e03d0bee1e26e76ea01986c5a783310",
-      "size": 439
+      "sha256": "80709c5d812f9cf7fa5f7d834342cecd0f0872d79f89482a39248cc8292b468b",
+      "size": 440
     },
     {
       "path": "bin/installation-location.cjs",
@@ -271,8 +271,8 @@
     },
     {
       "path": "bin/launcher-environment.mjs",
-      "sha256": "35961a60571f3eb4a62550458609d88449abfb60132d1a0cfba304665f3ecb44",
-      "size": 12924
+      "sha256": "8b6c77a8471d9262c902f833cd77ce23746e33a7b458a3456994ed0a377b7072",
+      "size": 12925
     },
     {
       "path": "bin/launcher-settings.mjs",
@@ -531,18 +531,18 @@
     },
     {
       "path": "install.ps1",
-      "sha256": "795646f6af3b6ec679c4a0642eb482b966218bcce8440006cec03fca8a65e800",
-      "size": 121773
+      "sha256": "f2db8910f042a0d831428be333f16d2fc9b880d027bf39e6203c1dfb1dc5c996",
+      "size": 121777
     },
     {
       "path": "install.sh",
-      "sha256": "5ceb38c71a5674efdb9d42fb7fd65dbe6d658c119e64bce661c204bb2175ce63",
-      "size": 91716
+      "sha256": "8147895596cbaf227956a8596063739867b4124f082d798520ddc712a8df7a1b",
+      "size": 91720
     },
     {
       "path": "package.json",
-      "sha256": "c1b1f9bbea8862129e29e98feab2d9e806ca4b1ac030c40958615446e89bbe2a",
-      "size": 3417
+      "sha256": "9ca82cd319495da7dec5da979807d8573286d589f2760ab20771ef9018236c6b",
+      "size": 3418
     },
     {
       "path": "patches/dsh-better-sidebar@0.26.0.patch",
@@ -946,8 +946,8 @@
     },
     {
       "path": "tavern-plugin/lib/application-updater.js",
-      "sha256": "60d75379ea6b441e8a7852d438da8a107a745f4e34ad14471a294630718c920b",
-      "size": 48998
+      "sha256": "c8411529debeb9896ea021faf10c6318819fdc3ad9d3a2ee99ced269a5b4b078",
+      "size": 49003
     },
     {
       "path": "tavern-plugin/lib/background-agent-runner.js",
@@ -2241,8 +2241,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/legacy-plugins.js",
-      "sha256": "b3db1824e3f7f97f9fbda36c02822e2c5560839cd8c33a224f0c23856149b1ed",
-      "size": 2734
+      "sha256": "2a656bfa63837769041b9f5d1369fb67e0eaffd3e71a9aa30e1e85112cb02122",
+      "size": 2735
     },
     {
       "path": "tavern-plugin/lib/domain/legacy-template-display-repair.js",
@@ -6841,8 +6841,8 @@
     },
     {
       "path": "tavern-plugin/packages/dsh-dream-skin/lib/font-assets.js",
-      "sha256": "fb25d05cab723d28d5b2b086f088b016baed9aaff4f62a3a32a558f4aab9b412",
-      "size": 8116
+      "sha256": "b79823292a437634f6517581d30168c6b15dffec0bbdab23a97686a452c42736",
+      "size": 8118
     },
     {
       "path": "tavern-plugin/packages/dsh-dream-skin/lib/font-catalog.json",
@@ -8766,8 +8766,8 @@
     },
     {
       "path": "tavern-plugin/packages/dsh-tavern/client.js",
-      "sha256": "b65de75cddbdb4e83128bed03558948261523e482f78af78ba93faf9d6fdbab9",
-      "size": 47801
+      "sha256": "bd6b6874e8e945824f2b8038a38f86a5c5e3457e670886017ae1acfb5f31d34d",
+      "size": 47802
     },
     {
       "path": "tavern-plugin/packages/dsh-tavern/cordis.patch.yml",
@@ -8801,8 +8801,8 @@
     },
     {
       "path": "tavern-plugin/packages/dsh-tavern/lib/installer-download.mjs",
-      "sha256": "f19f7b7b1eb89e6f98f02e5c32df1e619b88ae722f3438fec3778ce2f1f0dd95",
-      "size": 4465
+      "sha256": "9a9cdaef0aca35e100c0b57c3070f7a164c56d062f13f1b86944bbadff5acf9a",
+      "size": 4466
     },
     {
       "path": "tavern-plugin/packages/dsh-tavern/lib/processes.mjs",
@@ -8831,8 +8831,8 @@
     },
     {
       "path": "tavern-plugin/packages/dsh-tavern/lib/state.mjs",
-      "sha256": "eaa34df1666dc8f96aec8a44bbb8e5bde122b01fe431a630f468f58ea184ddfa",
-      "size": 16896
+      "sha256": "1f1d24ec8a2d1bd1a555ea9b35e3a784b0969f2c52b652634ca72c5de639f277",
+      "size": 16900
     },
     {
       "path": "tavern-plugin/packages/dsh-tavern/lib/trusted-home.mjs",
@@ -8866,13 +8866,13 @@
     },
     {
       "path": "tavern-plugin/packages/dsh-tavern/package.json",
-      "sha256": "4ee08ef172fb80a5d88dbf3db4271db2d3eb0d30adf8218299f4b8cea5453e09",
-      "size": 1324
+      "sha256": "70d5007647daa1d3e0ab6712c99ed6ec49df17a7874ecccb393a97e398a72166",
+      "size": 1327
     },
     {
       "path": "tavern-plugin/packages/dsh-tavern/README.md",
-      "sha256": "00da866bd96c2f73dbaa71f49c51a38bbb3bffffc8ed879c29d77e8bbebaff47",
-      "size": 20783
+      "sha256": "ad097a09797e9a9de2ff4ad2c5fc4053f79ed33c87b59284e12415b346ba737a",
+      "size": 20795
     },
     {
       "path": "tavern-plugin/pnpm-lock.yaml",
@@ -9246,9 +9246,9 @@
     }
   ],
   "archive": {
-    "commit": "383c94024111952275575ed4c9316893652693f9",
+    "commit": "087e8ecff02aee3b67c8ed8a8d63adaa0bff07ad",
     "path": "runtime.zip",
-    "sha256": "7364ce25f21900c722fee53caf7240b50ce9b53018dd50a04f2c5c4a3edbb40f",
-    "size": 16521873
+    "sha256": "bb01a2b44803d05df6194b7106bf0a7b21899c829c1ed1649fc54e5f7718e67f",
+    "size": 16521933
   }
 }

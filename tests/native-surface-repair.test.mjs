@@ -105,7 +105,8 @@ test('删除输入后：独立 assistant 写回，不带旧 user', () => {
   const result = repair(h)
   assert.equal(result.plan.rounds.length, 1)
   assert.equal(result.plan.rounds[0].userText, null)
-  assert.deepEqual(nodeTexts(h.session), ['前缀', '开场', '正文2'])
+  assert.deepEqual(nodeTexts(h.session), ['前缀', '开场', '', '正文2'])
+  assert.equal(sessionEvents(h.session).at(-3).surfaceOp, 'append')
   assert.equal(plan(h).status, 'intact')
 })
 
@@ -208,7 +209,7 @@ test('一轮都对不上也不拒绝：保留前缀和开场，按 Chat 整段�
   delete g.chat.messages.at(-1).nativeAnchor
   const full = repair(g)
   assert.equal(full.plan.status, 'full')
-  assert.deepEqual(nodeTexts(g.session), ['前缀', '开场', '行动2', '正文2'])
+  assert.deepEqual(nodeTexts(g.session), ['前缀', '', '开场', '行动2', '正文2'])
   assert.equal(plan(g).status, 'intact')
 })
 
@@ -456,8 +457,9 @@ test('perRound 为 true 且无保留轮次需清空失效尾部时，占位清�
   assert.equal(applied.applied, true)
   const events = sessionEvents(session)
   const emptyEvent = events.at(-3)
-  assert.equal(emptyEvent.type, 'assistant/message')
-  assert.equal(emptyEvent.data.turn, events.at(-1).data.turn)
+  assert.equal(emptyEvent.type, 'user/message')
+  assert.equal(emptyEvent.data.source?.kind, 'plugin:dsh-tavern-context-window')
+  assert.equal(events.at(-1).type, 'turn/end')
   assert.doesNotThrow(() => Session.fromRestore(session.id, events, session.header, 0, 'detached'))
 })
 
@@ -535,4 +537,183 @@ test('分叉含多条前置 standalone 与末尾 standalone 输入时，部分�
   assert.equal(planShowsRow(playedPlan, { turn: 5, kind: 'user' }), true)
   assert.equal(planShowsRow(playedPlan, { turn: 6, kind: 'user' }), true)
   assert.equal(planShowsRow(playedPlan, { turn: 6, kind: 'assistant-step' }), true)
+})
+
+test('keep 为 0 且需替换已有节点时先建立 system/message 保护头，V4 会话可恢复且节点结构合法', () => {
+  const base = Session.create('keep0-syshead-base')
+  const session = Session.create('keep0-syshead', [], { ...base.header, id: 'keep0-syshead', version: 4 })
+  appendSessionEvent(session, 'turn/start', { turn: 1 })
+  appendSessionEvent(session, 'user/message', { id: 'stale-u', role: 'user', content: [{ type: 'text', text: '旧残留' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+  const chat = {
+    id: 'chat-keep0-syshead', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场白' },
+      { role: 'user', text: '行动2' },
+      { role: 'assistant', turn: 2, text: '正文2' }
+    ]
+  }
+  const result = repairNativeSurface(session, chat, { repairId: 'keep0', perRound: true, seeded: true })
+  assert.equal(result.applied, true)
+  const events = sessionEvents(session)
+  const headEvent = events.find(event => event.seq === session.surface.nodes[0])
+  assert.equal(headEvent.type, 'system/message')
+  assert.deepEqual(nodeTexts(session), ['', '开场白', '行动2', '正文2'])
+  assert.doesNotThrow(() => Session.fromRestore(session.id, events, session.header, 0, 'detached'))
+})
+
+test('recordNativeSurfaceRepair 在所有锚点失效或空对齐且长度已变时不误清 nativeSync', () => {
+  const h = game(1)
+  const stale = { status: 'stale', reason: 'test', at: 1 }
+  h.chat.nativeSync = { ...stale }
+  const repairedSnapshot = structuredClone(h.chat)
+  const anchors = [{ messageIndex: 2, anchor: roundAnchor(2, sessionEvents(h.session)[2], sessionEvents(h.session)[3]), replyTurn: 2 }]
+  // 场景 A：当前楼层文本已在修复后被并发编辑，没有任何一行实际应用，保留 nativeSync。
+  const concurrentEdit = structuredClone(h.chat)
+  concurrentEdit.messages[2].text = '并发编辑后的新文本'
+  assert.equal(recordNativeSurfaceRepair(concurrentEdit, repairedSnapshot, anchors), false)
+  assert.deepEqual(concurrentEdit.nativeSync, stale)
+
+  // 场景 B：anchors 为空但消息长度已发生变化（并发新增/回退），不误清 nativeSync。
+  const grown = structuredClone(h.chat)
+  grown.messages.push({ role: 'user', text: '新输入' })
+  assert.equal(recordNativeSurfaceRepair(grown, repairedSnapshot, []), false)
+  assert.deepEqual(grown.nativeSync, stale)
+
+  // 场景 C：anchors 为空且消息长度未变时，正常清除 nativeSync。
+  const matching = structuredClone(h.chat)
+  assert.equal(recordNativeSurfaceRepair(matching, repairedSnapshot, []), true)
+  assert.equal(matching.nativeSync, undefined)
+})
+
+test('perRound 播种分叉轮重摇（替换到新原生轮）后玩家输入始终保留，二次重摇同样不丢失', () => {
+  const base = Session.create('seeded-regen-input-base')
+  const session = Session.create('seeded-regen-input', [], { ...base.header, id: 'seeded-regen-input', version: 4 })
+  const chat = {
+    id: 'chat-seeded-regen', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场' },
+      { role: 'user', text: '行动2' },
+      { role: 'assistant', turn: 2, text: '原正文2' }
+    ]
+  }
+  const seeded = repairNativeSurface(session, chat, { repairId: 'seed-regen', perRound: true, seeded: true })
+  assert.equal(seeded.applied, true)
+  recordNativeSurfaceRepair(chat, chat, seeded.anchors)
+  const { input: oldInputSeq, reply: oldReplySeq } = chat.messages[2].nativeAnchor
+
+  // 第 1 次重摇：attempt 原生轮 3 + projection replace 原生轮 4 替换第 2 轮助手回复。
+  appendSessionEvent(session, 'turn/start', { turn: 3 })
+  const t3 = appendSessionEvent(session, 'user/message', {
+    id: 'regen-trig-3', role: 'user', content: [], source: { kind: 'plugin:dsh-tavern-regen', regenerationId: 'rg-1' }
+  }, { surfaceOp: 'append' })
+  const a3 = appendSessionEvent(session, 'assistant/message', {
+    turn: 3, step: 1,
+    message: { id: 'attempt-3', role: 'assistant', content: [{ type: 'text', text: '重摇正文A' }], source: { ...model } }
+  }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/end', { turn: 3, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: 3, reason: { kind: 'completed' } })
+
+  appendSessionEvent(session, 'turn/start', { turn: 4 })
+  const r4 = appendSessionEvent(session, 'assistant/message', {
+    turn: 4, step: 1,
+    message: { id: 'regen-4', role: 'assistant', content: [{ type: 'text', text: '重摇正文A' }], source: { ...model, tavernStoryTurn: 2 } }
+  }, { surfaceOp: { op: 'replace', start: oldReplySeq, end: a3.seq }, sourceEventSeqs: [oldReplySeq, t3.seq, a3.seq] })
+  appendSessionEvent(session, 'step/end', { turn: 4, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: 4, reason: { kind: 'completed' } })
+  chat.messages[2].text = '重摇正文A'
+  chat.regeneratedDshTurns = { 2: 3 }
+
+  const plan1 = planTranscriptRows({ chat, events: sessionEvents(session) })
+  assert.equal(planShowsRow(plan1, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan1, { turn: 2, kind: 'assistant-step' }), false)
+  assert.equal(planShowsRow(plan1, { turn: 3, kind: 'user' }), false)
+  assert.equal(planShowsRow(plan1, { turn: 3, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(plan1, { turn: 4, kind: 'assistant-step' }), false)
+  assert.equal(planStoryTurn(plan1, 3), 2)
+
+  // 第 2 次重摇：attempt 原生轮 5 + projection replace 原生轮 6 再次替换第 2 轮正文。
+  appendSessionEvent(session, 'turn/start', { turn: 5 })
+  const t5 = appendSessionEvent(session, 'user/message', {
+    id: 'regen-trig-5', role: 'user', content: [], source: { kind: 'plugin:dsh-tavern-regen', regenerationId: 'rg-2' }
+  }, { surfaceOp: 'append' })
+  const a5 = appendSessionEvent(session, 'assistant/message', {
+    turn: 5, step: 1,
+    message: { id: 'attempt-5', role: 'assistant', content: [{ type: 'text', text: '重摇正文B' }], source: { ...model } }
+  }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/end', { turn: 5, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: 5, reason: { kind: 'completed' } })
+
+  appendSessionEvent(session, 'turn/start', { turn: 6 })
+  appendSessionEvent(session, 'assistant/message', {
+    turn: 6, step: 1,
+    message: { id: 'regen-6', role: 'assistant', content: [{ type: 'text', text: '重摇正文B' }], source: { ...model, tavernStoryTurn: 2 } }
+  }, { surfaceOp: { op: 'replace', start: r4.seq, end: a5.seq }, sourceEventSeqs: [r4.seq, t5.seq, a5.seq] })
+  appendSessionEvent(session, 'step/end', { turn: 6, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: 6, reason: { kind: 'completed' } })
+  chat.messages[2].text = '重摇正文B'
+  chat.regeneratedDshTurns = { 2: 5 }
+  // 即便保留原始 nativeAnchor（formatVersion 4）或更新至最新重摇 attempt 轮号，输入都必须留存。
+  assert.equal(chat.messages[2].nativeAnchor.input, oldInputSeq)
+
+  const plan2 = planTranscriptRows({ chat, events: sessionEvents(session) })
+  assert.equal(planShowsRow(plan2, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(plan2, { turn: 2, kind: 'assistant-step' }), false)
+  assert.equal(planShowsRow(plan2, { turn: 3, kind: 'user' }), false)
+  assert.equal(planShowsRow(plan2, { turn: 3, kind: 'assistant-step' }), false)
+  assert.equal(planShowsRow(plan2, { turn: 5, kind: 'user' }), false)
+  assert.equal(planShowsRow(plan2, { turn: 5, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(plan2, { turn: 6, kind: 'assistant-step' }), false)
+  assert.equal(planStoryTurn(plan2, 5), 2)
+})
+
+test('跳号分叉后不回退直接续聊撞同原生轮号（5）：旧第 5 轮与前置 standalone 不被抹除，两轮均正常展示', () => {
+  const base = Session.create('seeded-collision-base')
+  const session = Session.create('seeded-collision', [], { ...base.header, id: 'seeded-collision', version: 4 })
+  const chat = {
+    id: 'chat-collision', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场' },
+      { role: 'user', text: '悬空输入' },
+      { role: 'user', text: '旧行动5' },
+      { role: 'assistant', turn: 5, text: '旧正文5' }
+    ]
+  }
+  const seeded = repairNativeSurface(session, chat, { repairId: 'seed-collision', perRound: true, seeded: true })
+  assert.equal(seeded.applied, true)
+  recordNativeSurfaceRepair(chat, chat, seeded.anchors)
+
+  // 不回退旧第 5 轮（已落在原生轮 3），直接续聊两轮到原生轮 4 和 5（携带真实原生锚点）。
+  play(session, chat, 4, true)
+  play(session, chat, 5, true)
+  const collidedPlan = planTranscriptRows({ chat, events: sessionEvents(session) })
+  assert.equal(planShowsRow(collidedPlan, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(collidedPlan, { turn: 3, kind: 'user' }), true)
+  assert.equal(planShowsRow(collidedPlan, { turn: 3, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(collidedPlan, { turn: 4, kind: 'user' }), true)
+  assert.equal(planShowsRow(collidedPlan, { turn: 4, kind: 'assistant-step' }), true)
+  assert.equal(planShowsRow(collidedPlan, { turn: 5, kind: 'user' }), true)
+  assert.equal(planShowsRow(collidedPlan, { turn: 5, kind: 'assistant-step' }), true)
+})
+
+test('chatRounds 中携带不同显式 turn 的前置 user 不被错配进后续助手轮（Major 3）', () => {
+  const base = Session.create('explicit-turn-mismatch-base')
+  const session = Session.create('explicit-turn-mismatch', [], { ...base.header, id: 'explicit-turn-mismatch', version: 4 })
+  const chat = {
+    id: 'chat-turn-mismatch', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场' },
+      { role: 'user', turn: 2, text: '未回复的第2轮输入' },
+      { role: 'assistant', turn: 3, text: '无输入第3轮正文' }
+    ]
+  }
+  const plan = planNativeSurfaceRepair({ chat, events: sessionEvents(session), nodes: session.surface.nodes })
+  assert.equal(plan.rounds.length, 3)
+  assert.equal(plan.rounds[1].standalone, true)
+  assert.equal(plan.rounds[1].turn, 2)
+  assert.equal(plan.rounds[1].userText, '未回复的第2轮输入')
+  assert.equal(plan.rounds[2].standalone, undefined)
+  assert.equal(plan.rounds[2].turn, 3)
+  assert.equal(plan.rounds[2].userText, null)
+  assert.equal(plan.rounds[2].replyText, '无输入第3轮正文')
 })

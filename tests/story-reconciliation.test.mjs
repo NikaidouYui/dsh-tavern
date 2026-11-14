@@ -1,9 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Session } from './fixtures/dsh-session-host.mjs'
-import { appendSessionEvent, isEditLifecycleSuppressed, sessionEvents } from '../tavern-plugin/lib/domain/session-events.js'
+import {
+  appendSessionEvent,
+  clearSurfaceEditTurns,
+  isEditLifecycleSuppressed,
+  isSurfaceEditTurn,
+  markSurfaceEditTurn,
+  sessionEvents,
+  withSuppressedEditLifecycle,
+} from '../tavern-plugin/lib/domain/session-events.js'
 import { createSessionSurfaceMutator } from '../tavern-plugin/lib/domain/session-surface-mutations.js'
 import { createStoryReconciliation } from '../tavern-plugin/lib/domain/story-reconciliation.js'
+import { registerTurnLifecycleHooks } from '../tavern-plugin/lib/hooks/turn-lifecycle.js'
+import { producerSource } from '../tavern-plugin/lib/domain/message-source.js'
+import { initializationFixture } from './fixtures/conversation-initialization.mjs'
 
 const reply = (id, turn) => ({ turn, step: 1, message: { id, role: 'assistant', content: [{ type: 'text', text: id }], source: { kind: 'model', provider: 'test', model: 'test' } } })
 
@@ -186,4 +197,266 @@ test('seedNativeStory 批量按轮播种期间开启静默编辑抑制标记，�
     } }, { surfaceOp: 'append', sourceEventSeqs: [] })
   })
   assert.deepEqual(singleStates, [false, false])
+})
+
+test('seedNativeStory 注入 ensurePrefix 且 flush 在写入后失败时完整回滚状态并标记 stale，恢复后重试幂等成功', async () => {
+  const base = Session.create('seed-flush-rb-base')
+  const session = Session.create('seed-flush-rb', [], { ...base.header, id: 'seed-flush-rb', version: 4 })
+  const beforeEvents = structuredClone(sessionEvents(session))
+  const agent = { session, phase: { kind: 'idle' } }
+  let saved = {
+    id: 'chat-flush-rb',
+    mode: 'story',
+    forkedFrom: { chatId: 'src-chat', round: 2 },
+    nativeOpeningAppended: false,
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场白' },
+      { role: 'user', text: '行动2' },
+      { role: 'assistant', turn: 2, text: '正文2' }
+    ]
+  }
+
+  let flushShouldFail = true
+  let flushCalls = 0
+  const prefixFlushOpts = []
+  const mutatorWrite = target => {
+    const m = createSessionSurfaceMutator(target, sessionEvents(target))
+    m.editStep((turn, step) => {
+      m.append('system/message', {
+        turn,
+        step,
+        message: { id: 'sys-prefix', role: 'system', content: [{ type: 'text', text: '固定系统前缀' }], source: producerSource('@deepseek-ai/dsh-system-prompt', undefined, 'system') }
+      }, { surfaceOp: 'append' })
+    })
+  }
+  const sessionStore = {
+    get: id => (id === session.id ? session : undefined),
+    flush: async target => {
+      flushCalls++
+      if (flushShouldFail) throw new Error('模拟持久化刷盘失败')
+      return target
+    }
+  }
+  const rec = createStoryReconciliation({
+    agentRegistry: { get: id => (id === session.id ? agent : undefined) },
+    sessionStore,
+    chatForSession: async () => structuredClone(saved),
+    chatSliceForSession: async () => ({ chat: structuredClone(saved), total: saved.messages.length, omitted: 0 }),
+    updateChat: async (_id, mutate) => {
+      const next = mutate(structuredClone(saved))
+      if (next) saved = next
+      return saved
+    },
+    turns: { finalize: async () => {} },
+    ensurePrefix: async (target, _chat, opts = {}) => {
+      prefixFlushOpts.push(opts.flush)
+      if (!sessionEvents(target).some(e => e.type === 'system/message')) mutatorWrite(target)
+      return true
+    }
+  })
+
+  const failedRes = await rec.seedNativeStory(session.id, session, 'flush-fail-test')
+  assert.equal(failedRes, null)
+  // 回滚验证：ensurePrefix 收到了 { flush: false }，活 Session 全部写入、节点、phase 与编辑态清零，并打上 stale 标记
+  assert.deepEqual(prefixFlushOpts, [false])
+  assert.equal(flushCalls, 1)
+  assert.deepEqual(sessionEvents(session), beforeEvents)
+  assert.deepEqual(session.surface.nodes, [])
+  assert.equal('lastTurn' in agent.phase, false)
+  assert.equal(isEditLifecycleSuppressed(session), false)
+  assert.equal(isSurfaceEditTurn(session, 1), false)
+  assert.equal(isSurfaceEditTurn(session, 2), false)
+  assert.equal(isSurfaceEditTurn(session, 3), false)
+  assert.equal(saved.nativeSync?.status, 'stale')
+
+  // 恢复 flush 后重试，应一次性幂等播种成功并清理 stale
+  flushShouldFail = false
+  const res = await rec.seedNativeStory(session.id, session, 'flush-retry-test')
+  assert.equal(res.applied, true)
+  assert.equal(res.prefixed, true)
+  assert.equal(flushCalls, 2)
+  assert.equal(saved.nativeSync, undefined)
+  assert.ok(session.surface.nodes.length >= 4)
+  assert.doesNotThrow(() => Session.fromRestore(session.id, sessionEvents(session), session.header, 0, 'detached'))
+})
+
+test('超过 16 轮 markSurfaceEditTurn 全量保留不截断，withSuppressedEditLifecycle 拒绝 Promise/thenable 且不锁死抑制态', () => {
+  const session = Session.create('gt16-and-sync-check')
+  const turns = Array.from({ length: 20 }, (_, i) => i + 1)
+  withSuppressedEditLifecycle(session, () => {
+    for (const t of turns) markSurfaceEditTurn(session, t)
+    assert.equal(isEditLifecycleSuppressed(session), true)
+  })
+  assert.equal(isEditLifecycleSuppressed(session), false)
+  for (const t of turns) {
+    assert.equal(isSurfaceEditTurn(session, t), true, `轮次 ${t} 的编辑标记不应因超过 16 轮而被截断`)
+  }
+  clearSurfaceEditTurns(session)
+  for (const t of turns) {
+    assert.equal(isSurfaceEditTurn(session, t), false)
+  }
+
+  assert.throws(() => withSuppressedEditLifecycle(session, 'not-a-fn'), TypeError)
+  assert.throws(() => withSuppressedEditLifecycle(session, () => Promise.resolve(1)), TypeError)
+  assert.throws(() => withSuppressedEditLifecycle(session, async () => 1), TypeError)
+  assert.throws(() => withSuppressedEditLifecycle(session, () => ({ then() {} })), TypeError)
+  assert.equal(isEditLifecycleSuppressed(session), false)
+})
+
+test('registerTurnLifecycleHooks 在未标 edit 仅 isEditLifecycleSuppressed 为 true 时拦截全套前景副作用，撤销后恢复', async () => {
+  const handlers = new Map()
+  const session = Session.create('suppress-hook-isolation')
+  const calls = { cancel: 0, turnStarted: 0, handoffEnd: 0, flushEdits: 0, completed: 0, reconcile: 0 }
+
+  registerTurnLifecycleHooks({
+    ctx: { on: (name, fn) => { handlers.set(name, fn) } },
+    flushQueuedBodyEdits: () => { calls.flushEdits++; return Promise.resolve(0) },
+    backgroundAgentRunner: { owns: () => false },
+    foregroundHandoff: { end: () => { calls.handoffEnd++ } },
+    autoChoices: { cancel: () => { calls.cancel++ }, completed: async () => { calls.completed++ } },
+    clearRuntimePresetRequestState() {},
+    pluginBodyGeneration: {},
+    reconcileWhenIdle: async () => { calls.reconcile++ },
+    hookChatForSession: async () => null,
+    contentText: () => '',
+    ensureNativeSystemPrefix: async () => {},
+    foregroundStrategies: {},
+    nativeWorldBookTemplateContext: async () => ({}),
+    persistClearedBodyEdits: async () => {},
+    pluginPromptSections: async () => [],
+    publishResourceWorkspace: async () => ({}),
+    readChatCard: async () => null,
+    replaceAssistantReply() {},
+    requestIdForTurn: () => '',
+    requestPerformance: null,
+    runtimePrompt: () => '',
+    sessionStore: { flush: async () => {} },
+    storyOutputToolCall: async () => null,
+    turnOrchestrator: { modeFor: async () => 'story' },
+    turnStarted: () => { calls.turnStarted++ },
+    userMessageForTurn: () => null,
+  })
+  const onSessionEvent = handlers.get('session/event')
+
+  // 第 1 轮：故意不调用 markSurfaceEditTurn（edit === false），仅处于 withSuppressedEditLifecycle 抑制窗口内
+  withSuppressedEditLifecycle(session, () => {
+    appendSessionEvent(session, 'turn/start', { turn: 1 })
+    onSessionEvent(session, { type: 'turn/start', seq: 0, data: { turn: 1 } })
+    appendSessionEvent(session, 'assistant/message', {
+      turn: 1, step: 1,
+      message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: '测试' }], source: { kind: 'model', provider: 'test', model: 'm' } }
+    }, { surfaceOp: 'append' })
+    appendSessionEvent(session, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+    onSessionEvent(session, { type: 'turn/end', seq: 2, data: { turn: 1, reason: { kind: 'completed' } } })
+  })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(calls, { cancel: 0, turnStarted: 0, handoffEnd: 0, flushEdits: 0, completed: 0, reconcile: 0 })
+
+  // 撤销抑制后触发第 2 轮普通对话：所有副作用恢复触发
+  appendSessionEvent(session, 'turn/start', { turn: 2 })
+  onSessionEvent(session, { type: 'turn/start', seq: 3, data: { turn: 2 } })
+  appendSessionEvent(session, 'assistant/message', {
+    turn: 2, step: 1,
+    message: { id: 'm2', role: 'assistant', content: [{ type: 'text', text: '正常回合' }], source: { kind: 'model', provider: 'test', model: 'm' } }
+  }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+  onSessionEvent(session, { type: 'turn/end', seq: 5, data: { turn: 2, reason: { kind: 'completed' } } })
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  assert.deepEqual(calls, { cancel: 1, turnStarted: 1, handoffEnd: 1, flushEdits: 1, completed: 1, reconcile: 1 })
+})
+
+test('conversation-initialization 对任何 forkedFrom（含空 messages）均无条件早退 appendNativeOpening，且复用外部注入 serialize 锁', async () => {
+  const f = initializationFixture()
+  const lockCalls = []
+  let activeForSession = 0
+  let maxConcurrent = 0
+  const pending = new Map()
+  function externalSerialize(sessionId, work) {
+    lockCalls.push(sessionId)
+    const key = typeof sessionId === 'string' ? sessionId : ''
+    const run = async () => {
+      activeForSession++
+      maxConcurrent = Math.max(maxConcurrent, activeForSession)
+      try { return await work() } finally { activeForSession-- }
+    }
+    const prev = pending.get(key) || Promise.resolve()
+    const next = prev.catch(() => {}).then(run)
+    pending.set(key, next)
+    return next.finally(() => { if (pending.get(key) === next) pending.delete(key) })
+  }
+
+  // 直接用带外部 serialize 的 createConversationInitialization（借助 fixture 的默认组装 + 替换 serialize）
+  const { createConversationInitialization } = await import('../tavern-plugin/lib/domain/conversation-initialization.js')
+  const { createPlayCardSnapshots } = await import('../tavern-plugin/lib/domain/play-card-snapshots.js')
+  const { createStoryTimeline } = await import('../tavern-plugin/lib/domain/story-timeline.js')
+  const { createContextPlanner } = await import('../tavern-plugin/lib/domain/context-planner.js')
+
+  let seq = 0
+  const snapshots = createPlayCardSnapshots({
+    worldBooks: { bound: async () => ({ view: { entries: [] } }) },
+    planner: createContextPlanner({ prompt: () => '' }),
+    readCard: async () => structuredClone(f.card),
+    writeChat: async chat => { f.saved.set(chat.id, structuredClone(chat)) },
+  })
+  const init = createConversationInitialization({
+    serialize: externalSerialize,
+    cards: {
+      read: async () => structuredClone(f.card),
+      readChat: async () => structuredClone(f.card),
+      script: async () => undefined,
+      extensions: async () => ({}),
+      startDefaults: async () => null,
+    },
+    chats: {
+      resolve: f.registry.resolve,
+      publish: f.registry.publish,
+      write: async (chat, metadata) => { f.trace.push(metadata.source); f.saved.set(chat.id, structuredClone(chat)); return chat },
+    },
+    snapshots,
+    timeline: createStoryTimeline({ id: p => p + '-' + ++seq, now: () => 123 }),
+    presets: { fullSnapshot: async () => ({ regexScripts: [] }) },
+    settings: async () => ({ compatibilityMode: true }),
+    emptyCardWorkspace: () => ({ mountedResources: [], draft: {} }),
+    id: p => p + '-' + ++seq,
+    now: () => 123,
+    native: {
+      async wait(id) { f.trace.push('wait:' + id); return { session: f.session(id), agent: { phase: f.session(id).phase } } },
+      async ensurePrefix(target, text) { f.trace.push('prefix:' + target.id); target.prefix ||= text },
+      async flush(target) { f.trace.push('flush:' + target.id); target.durable = structuredClone(target.events) },
+      async ensureCardWorkspace() {},
+      async selectModel() {},
+      selection: () => ({ provider: 'fixture', model: 'text' }),
+    },
+    present: async chat => chat,
+    logger: { warn() {} },
+  })
+
+  // 场景 A：空 messages: [] 但带有 forkedFrom 的分叉聊天 -> ensureOpening 不得写开场或 prefix/flush
+  const forkEmptySessionId = 'fork-empty-s'
+  const forkEmptyChat = { id: 'fork-empty-c', sessionId: forkEmptySessionId, cardPath: f.card.path, mode: 'story', forkedFrom: { chatId: 'src', round: 0 }, messages: [] }
+  await f.registry.publish(forkEmptyChat)
+  await init.ensureOpening(forkEmptySessionId)
+  assert.deepEqual(f.session(forkEmptySessionId).events, [])
+  assert.equal(f.saved.get(forkEmptyChat.id)?.nativeOpeningAppended, undefined)
+  assert.equal(f.trace.some(item => item.endsWith(forkEmptySessionId)), false)
+
+  // 场景 B：带消息体的 forkedFrom 分叉 -> 同理无条件早退
+  const forkMsgSessionId = 'fork-msg-s'
+  const forkMsgChat = { id: 'fork-msg-c', sessionId: forkMsgSessionId, cardPath: f.card.path, mode: 'story', forkedFrom: { chatId: 'src', round: 1 }, messages: [{ role: 'assistant', turn: 1, greeting: true, text: '开场' }] }
+  await f.registry.publish(forkMsgChat)
+  await init.ensureOpening(forkMsgSessionId)
+  assert.deepEqual(f.session(forkMsgSessionId).events, [])
+  assert.equal(f.saved.get(forkMsgChat.id)?.nativeOpeningAppended, undefined)
+
+  // 场景 C：并发调用普通会话初始化，验证通过同一个外部注入 serialize 严格串行化
+  const normalSid = 'normal-serialized-s'
+  await Promise.all([
+    init.start({ cardPath: f.card.path, sessionId: normalSid, mode: 'play', userName: '玩家' }),
+    init.ensureOpening(normalSid),
+  ])
+  assert.ok(lockCalls.includes(forkEmptySessionId))
+  assert.ok(lockCalls.includes(forkMsgSessionId))
+  assert.ok(lockCalls.filter(id => id === normalSid).length >= 2)
+  assert.equal(maxConcurrent, 1)
 })

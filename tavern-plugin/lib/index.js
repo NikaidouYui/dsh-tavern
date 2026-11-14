@@ -2339,7 +2339,7 @@ export async function apply(ctx) {
   })
   const playCardSnapshots = createPlayCardSnapshots({ worldBooks, planner: contextPlanner, readCard: readChatCard, readLatestCard, writeChat, updateChat, userPreferenceProfile })
   const ensurePlayCardSnapshot = playCardSnapshots.ensure
-  async function ensureNativeSystemPrefix(session, chat) {
+  async function ensureNativeSystemPrefix(session, chat, { flush = true } = {}) {
     // Rebuilding the snapshot persists the complete Chat; a bounded history cannot.
     if (isScopedMessages(chat?.messages) && playCardSnapshots.settled(chat) === undefined) chat = await chatForSession(session.id)
     const before = readSessionStablePrefix(session)
@@ -2348,8 +2348,19 @@ export async function apply(ctx) {
     const text = !cardAgent && before?.version === 3 && revision <= before.revision ? '' : await ensurePlayCardSnapshot(chat)
     const prefix = await ensureSessionStablePrefix(session, text, stablePrefixStorage, revision)
     const directory = cardAgent ? false : ensureSessionVariableDirectory(session, chat)
-    if (directory || prefix && prefix.event !== before?.event) await sessionStore.flush(session)
+    if (flush && (directory || prefix && prefix.event !== before?.event)) await sessionStore.flush(session)
     return prefix
+  }
+  const sessionLifecyclePending = new Map()
+  function serializeSessionLifecycle(sessionId, work) {
+    const key = typeof sessionId === 'string' ? sessionId : ''
+    if (!key) return work()
+    const previous = sessionLifecyclePending.get(key) || Promise.resolve()
+    const operation = previous.catch(() => {}).then(work)
+    sessionLifecyclePending.set(key, operation)
+    return operation.finally(() => {
+      if (sessionLifecyclePending.get(key) === operation) sessionLifecyclePending.delete(key)
+    })
   }
   async function ensureNativeCardWorkspace(session, chat) {
     const projection = await publishResourceWorkspace(session.id, chat)
@@ -2359,6 +2370,7 @@ export async function apply(ctx) {
     return message.data.content[0].text
   }
   const conversationInitialization = createConversationInitialization({
+    serialize: serializeSessionLifecycle,
     cards: { read: readCard, readChat: readChatCard, script: readScript, extensions: readCardExtensions,
       startDefaults: async cardPath => (await castAssets.read(normalizeResourcePath(cardPath, 'card'))).startDefaults || null },
     chats: { resolve: chatForSession, publish: conversationRegistry.publish, write: writeChat, update: updateChat,
@@ -2610,48 +2622,51 @@ export async function apply(ctx) {
     const sourceChanged = !(storyDirect && messageUid) && expectedRevision !== source._storageRevision
     if (sourceChanged || (!storyDirect && expectedAtSeq !== atSeq)) throw new Error('源对话已变化，请重新选择分叉位置')
     const targetId = str(targetSessionId)
-    if (targetId === '' || await chatForSession(targetId) !== undefined) throw new Error('分叉目标必须是尚未绑定对话的新 Session')
-    let targetHandle
-    let target = sessionStore.get(targetId) || agentRegistry.get(targetId)?.session
-    try {
-      if (!target) { targetHandle = await agentRegistry.resume({ resumeSessionId: targetId }); target = targetHandle.agent.session }
-      if (!target) throw new Error('分叉目标原生会话尚未就绪')
-      if (storyDirect) assertBlankStoryForkTarget(targetId, target)
-      else {
-        const targetEnd = sessionEvents(target).findLast(event => event.type === 'turn/end')
-        if (!targetEnd || targetEnd.seq !== atSeq) throw new Error('原生分叉没有停在指定回合，已拒绝绑定游戏状态')
-      }
-      const lastNativeTurn = storyDirect ? 0 : Number(sessionEvents(target).findLast(event => event.type === 'turn/start')?.data?.turn) || 0
-      const includedTurns = new Set((state.messages || []).filter(message => message?.role === 'assistant')
-        .map(message => Number(message.turn)).filter(turn => Number.isSafeInteger(turn) && turn >= 0))
-      const fork = forkConversationChat(state, { chatId: uid('chat'), sessionId: targetId, id: uid, now: Date.now, lastNativeTurn })
-      fork.forkedFrom = { ...fork.forkedFrom, chatId: source.id, sessionId: source.sessionId, storageRevision: source._storageRevision,
-        stateChatId: state.id, stateRevision: state._storageRevision, turn, ...(storyDirect ? { messageIndex, atSeq: null } : { atSeq }) }
-      if (storyDirect) {
-        fork.nativeSync = { status: 'stale', reason: '故事分叉等待原生上下文同步', at: Date.now() }
-        // Do not suppress opening recovery until the native prefix really exists.
-        fork.nativeOpeningAppended = false
-      }
-      await conversationRegistry.publish(fork, storyDirect ? {
-        assertUnboundSession: () => assertBlankStoryForkTarget(targetId, target)
-      } : undefined)
-      await saveMaintenance.recordFork(fork).catch(error => console.warn('dsh-tavern: 记录分叉来源失败', str(error?.message || error)))
-      await sceneWorldbookArchive.copyRefs(state.id, fork.id, includedTurns).catch(() => {})
-      await forkPluginState(source, state, fork, turn, includedTurns)
-      if (storyDirect) {
-        const repaired = await seedNativeStory(targetId, target, '故事分叉后按消息历史建立原生上下文')
-          .catch(error => { console.warn('dsh-tavern: 故事分叉原生上下文修复失败:', str(error?.message || error)); return null })
-        if (repaired?.applied) {
-          fork.nativeOpeningAppended = true
-          await updateChatHeader(fork.id, ['nativeOpeningAppended'], () => ({ nativeOpeningAppended: true }), { source: 'conversation.story-fork-native-ready' })
-            .catch(error => console.warn('dsh-tavern: 保存故事分叉开场白状态失败:', str(error?.message || error)))
+    if (targetId === '') throw new Error('分叉目标必须是尚未绑定对话的新 Session')
+    return await serializeSessionLifecycle(targetId, async () => {
+      if (await chatForSession(targetId) !== undefined) throw new Error('分叉目标必须是尚未绑定对话的新 Session')
+      let targetHandle
+      let target = sessionStore.get(targetId) || agentRegistry.get(targetId)?.session
+      try {
+        if (!target) { targetHandle = await agentRegistry.resume({ resumeSessionId: targetId }); target = targetHandle.agent.session }
+        if (!target) throw new Error('分叉目标原生会话尚未就绪')
+        if (storyDirect) assertBlankStoryForkTarget(targetId, target)
+        else {
+          const targetEnd = sessionEvents(target).findLast(event => event.type === 'turn/end')
+          if (!targetEnd || targetEnd.seq !== atSeq) throw new Error('原生分叉没有停在指定回合，已拒绝绑定游戏状态')
         }
+        const lastNativeTurn = storyDirect ? 0 : Number(sessionEvents(target).findLast(event => event.type === 'turn/start')?.data?.turn) || 0
+        const includedTurns = new Set((state.messages || []).filter(message => message?.role === 'assistant')
+          .map(message => Number(message.turn)).filter(turn => Number.isSafeInteger(turn) && turn >= 0))
+        const fork = forkConversationChat(state, { chatId: uid('chat'), sessionId: targetId, id: uid, now: Date.now, lastNativeTurn })
+        fork.forkedFrom = { ...fork.forkedFrom, chatId: source.id, sessionId: source.sessionId, storageRevision: source._storageRevision,
+          stateChatId: state.id, stateRevision: state._storageRevision, turn, ...(storyDirect ? { messageIndex, atSeq: null } : { atSeq }) }
+        if (storyDirect) {
+          fork.nativeSync = { status: 'stale', reason: '故事分叉等待原生上下文同步', at: Date.now() }
+          // Do not suppress opening recovery until the native prefix really exists.
+          fork.nativeOpeningAppended = false
+        }
+        await conversationRegistry.publish(fork, storyDirect ? {
+          assertUnboundSession: () => assertBlankStoryForkTarget(targetId, target)
+        } : undefined)
+        await saveMaintenance.recordFork(fork).catch(error => console.warn('dsh-tavern: 记录分叉来源失败', str(error?.message || error)))
+        await sceneWorldbookArchive.copyRefs(state.id, fork.id, includedTurns).catch(() => {})
+        await forkPluginState(source, state, fork, turn, includedTurns)
+        if (storyDirect) {
+          const repaired = await seedNativeStory(targetId, target, '故事分叉后按消息历史建立原生上下文')
+            .catch(error => { console.warn('dsh-tavern: 故事分叉原生上下文修复失败:', str(error?.message || error)); return null })
+          if (repaired && (repaired.applied || repaired.prefixed)) {
+            fork.nativeOpeningAppended = true
+            await updateChatHeader(fork.id, ['nativeOpeningAppended'], () => ({ nativeOpeningAppended: true }), { source: 'conversation.story-fork-native-ready' })
+              .catch(error => console.warn('dsh-tavern: 保存故事分叉开场白状态失败:', str(error?.message || error)))
+          }
+        }
+        const receiptTurn = turn > 0 ? turn : Math.max(0, ...includedTurns)
+        return conversationForkReceipt(fork, { lastTurn: receiptTurn, messageCount: fork.messages.length })
+      } finally {
+        if (targetHandle) await targetHandle.dispose().catch(error => console.warn('dsh-tavern: 释放分叉目标 Session 句柄失败:', str(error?.message || error)))
       }
-      const receiptTurn = turn > 0 ? turn : Math.max(0, ...includedTurns)
-      return conversationForkReceipt(fork, { lastTurn: receiptTurn, messageCount: fork.messages.length })
-    } finally {
-      if (targetHandle) await targetHandle.dispose().catch(error => console.warn('dsh-tavern: 释放分叉目标 Session 句柄失败:', str(error?.message || error)))
-    }
+    })
   }
 
   const backgroundRetirement = createBackgroundSessionRetirement(profileData, { readState: taskStateReader.forSession, isRunning: id => agentRegistry.get(id)?.status === 'running' })
@@ -3929,7 +3944,8 @@ export async function apply(ctx) {
     shellToolName: process.platform === 'win32' ? 'pwsh' : 'bash'
   })
   const storyReconciliation = createStoryReconciliation({
-    agentRegistry, sessionStore, chatForSession, chatSliceForSession, updateChat, turns: turnOrchestrator
+    agentRegistry, sessionStore, chatForSession, chatSliceForSession, updateChat, turns: turnOrchestrator,
+    ensurePrefix: ensureNativeSystemPrefix
   })
   const { reconcileStory, reconcileWhenIdle, assertBlankStoryForkTarget, seedNativeStory } = storyReconciliation
   // 任务表 (domain/background-tasks.js): every background task is declared there once; this

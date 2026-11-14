@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { repairNativeSurface, recordNativeSurfaceRepair, planNativeSurfaceRepair } from './native-surface-repair.js'
 import { reshadowRolledBackRounds } from './rollback-surface.js'
-import { sessionEvents, withSuppressedEditLifecycle } from './session-events.js'
+import { clearSurfaceEditTurns, markSurfaceEditTurn, releaseOpeningTurn, sessionEvents, withSuppressedEditLifecycle } from './session-events.js'
 import { inspectStoryAlignment, nativeStoryTurns } from './story-alignment.js'
 
 function str(value) {
@@ -12,7 +12,7 @@ function str(value) {
 // acts on "the latest round" (#196): record a round the save missed, re-shadow
 // a rolled-back round the model still sees, and rewrite the native tail from the
 // save when their text drifted. The save is the truth. Never blocks the caller.
-export function createStoryReconciliation({ agentRegistry, sessionStore, chatForSession, chatSliceForSession, updateChat, turns }) {
+export function createStoryReconciliation({ agentRegistry, sessionStore, chatForSession, chatSliceForSession, updateChat, turns, ensurePrefix }) {
   const liveSession = sessionId => sessionStore.get(sessionId) || agentRegistry.get(sessionId)?.session
   // Reconciling writes the save: never while a turn of that session runs, where
   // it would wait on the very turn it shares the template runtime with.
@@ -61,13 +61,54 @@ export function createStoryReconciliation({ agentRegistry, sessionStore, chatFor
   // carries no context, so its tail is built from the save once, at fork time.
   // Nothing reconciles or repairs a live session behind the player's back.
   async function seedNativeStory(sessionId, session, reason) {
-    const chat = await chatForSession(sessionId)
-    if (!chat || chat.regenInProgress || !['story', 'script'].includes(chat.mode || 'story')) return null
+    const initialChat = await chatForSession(sessionId)
+    if (!initialChat || initialChat.regenInProgress || !['story', 'script'].includes(initialChat.mode || 'story')) return null
+    const agent = agentRegistry.get(sessionId)
+    const beforeLastTurn = agent?.phase?.lastTurn
+    const beforeHadLastTurn = Boolean(agent?.phase && Object.hasOwn(agent.phase, 'lastTurn'))
+    const SessionClass = session?.constructor
+    const beforeEvents = session ? structuredClone(sessionEvents(session)) : []
+    const beforeHeader = session?.header ? structuredClone(session.header) : undefined
+    const beforeInherited = session?.inheritedEventCount ?? 0
+    const beforeNodes = Array.isArray(session?.surface?.nodes) ? [...session.surface.nodes] : null
+
+    function rollbackSessionState() {
+      if (!session || typeof session !== 'object') return
+      const currentEvents = sessionEvents(session)
+      const currentNodes = Array.isArray(session.surface?.nodes) ? session.surface.nodes : []
+      const mutated = currentEvents.length !== beforeEvents.length
+        || (beforeNodes !== null && currentNodes.length !== beforeNodes.length)
+      if (mutated) {
+        if (typeof SessionClass?.fromRestore === 'function') {
+          const restored = SessionClass.fromRestore(session.id, beforeEvents, beforeHeader, beforeInherited)
+          Object.assign(session, restored)
+        } else if (Array.isArray(session.events)) {
+          session.events.splice(0, session.events.length, ...beforeEvents)
+          if (beforeNodes && Array.isArray(session.surface?.nodes)) {
+            session.surface.nodes.splice(0, session.surface.nodes.length, ...beforeNodes)
+          }
+        }
+      }
+      clearSurfaceEditTurns(session)
+      if (agent?.phase) {
+        if (beforeHadLastTurn) agent.phase.lastTurn = beforeLastTurn
+        else delete agent.phase.lastTurn
+      }
+    }
+
     try {
       // The session may have received a turn while the fork save was being written.
       assertBlankStoryForkTarget(sessionId, session)
+      let prefixed = false
+      if (typeof ensurePrefix === 'function') {
+        // 先于开场前缀写入前标记轮次 1 为表面编辑轮，避免打开首轮时触发非预期的生命周期副作用。
+        markSurfaceEditTurn(session, 1)
+        await ensurePrefix(session, initialChat, { flush: false })
+        withSuppressedEditLifecycle(session, () => releaseOpeningTurn(session, agent))
+        prefixed = sessionEvents(session).length > beforeEvents.length
+      }
+      const chat = (await chatForSession(sessionId)) || initialChat
       const repairId = randomUUID()
-      const SessionClass = session?.constructor
       if (typeof SessionClass?.fromRestore === 'function') {
         // 先在隔离的 detached 副本上试跑按轮投影，验证全过程无异常后再写入活 Session，避免中途失败留下半成品事件。
         const probe = SessionClass.fromRestore(
@@ -82,13 +123,21 @@ export function createStoryReconciliation({ agentRegistry, sessionStore, chatFor
       const result = withSuppressedEditLifecycle(session, () =>
         repairNativeSurface(session, chat, { repairId, perRound: true, seeded: true })
       )
-      if (result.applied) await sessionStore.flush(session)
+      // 同步推进 idle Agent 的 lastTurn（不强依赖全局 agentLookup），防止分叉后首条玩家消息撞上刚播种的轮号。
+      if (result.applied && agent?.phase?.kind === 'idle') {
+        const highestTurn = sessionEvents(session).reduce((highest, event) =>
+          event?.type === 'turn/start' ? Math.max(highest, Number(event.data?.turn) || 0) : highest, 0)
+        if (highestTurn > 0) agent.phase.lastTurn = Math.max(Number(agent.phase.lastTurn) || 0, highestTurn)
+      }
+      const hasSessionWrites = result.applied || sessionEvents(session).length > beforeEvents.length
+      if (hasSessionWrites) await sessionStore.flush(session)
       await updateChat(chat.id, current => recordNativeSurfaceRepair(current, chat, result.anchors) ? current : undefined, { source: 'native-seed' })
       if (result.applied) console.warn('dsh-tavern: 故事分叉建原生上下文（' + reason + '），写入最近 ' + result.plan.rounds.length + ' 轮')
-      return result
+      return { ...result, prefixed }
     } catch (error) {
+      rollbackSessionState()
       console.warn('dsh-tavern: 故事分叉建原生上下文失败：' + str(error?.message || error))
-      await markNativeStale(chat.id, reason).catch(() => {})
+      await markNativeStale(initialChat.id, reason).catch(() => {})
       return null
     }
   }

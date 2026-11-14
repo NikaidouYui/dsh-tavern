@@ -220,30 +220,71 @@
 				if (table.get(value) === owner) return;
 				table.set(value, owner);
 			}
+			function hasEarlierOwner(sessionId, story, turn) {
+				const target = Number(story), limit = Number(turn);
+				for (const [native, mapped] of rows(sessionId).entries()) {
+					if (mapped === target && native < limit) return true;
+				}
+				return false;
+			}
+			function shownTurnsForStory(sessionId, story) {
+				const target = Number(story), result = [];
+				for (const [native, mapped] of rows(sessionId).entries()) {
+					if (mapped === target) result.push(native);
+				}
+				return result;
+			}
 			return Object.freeze({ remember: remember, rows: rows,
 				shown: function (sessionId, turn) { return rows(sessionId).has(Number(turn)); },
 				storyOf: function (sessionId, turn) { return rows(sessionId).get(Number(turn)) || Number(turn); },
+				hasEarlierOwner: hasEarlierOwner,
+				shownTurnsForStory: shownTurnsForStory,
 				forget: function (sessionId, turn) { rows(sessionId).delete(Number(turn)); } });
 		})();
-		// 计划里正文落在哪些轮（drawn）、哪些轮自己那行的正文被计划收掉（hidden），
+		// 计划里正文落在哪些轮（drawn / drawnTurns）、哪些轮自己那行的正文被计划收掉（hidden / hiddenNative），
 		// 以及哪些轮的玩家输入还在画（input）：一轮连输入都不画了，就是这一轮被回退/删掉了。
 		function tavernPlanBodyDigest(plan) {
-			const drawn = new Set(), hidden = new Set(), input = new Set();
-			if (!plan || !plan.turns) return { drawn: drawn, hidden: hidden, input: input };
+			const drawn = new Set(), drawnTurns = new Map(), hidden = new Set(), hiddenNative = new Set(), input = new Set();
+			if (!plan || !plan.turns) return { drawn: drawn, drawnTurns: drawnTurns, hidden: hidden, hiddenNative: hiddenNative, input: input };
 			for (const key of Object.keys(plan.turns)) {
 				const entry = plan.turns[key];
 				if (!entry) continue;
-				const owner = Number(entry.story) || Number(key);
-				if (entry.reply === 1) drawn.add(owner);
-				else hidden.add(owner);
-				if (entry.input === 1) input.add(Number(key));
+				const nativeTurn = Number(key);
+				const owner = Number(entry.story) || nativeTurn;
+				if (entry.reply === 1) {
+					drawn.add(owner);
+					let list = drawnTurns.get(owner);
+					if (!list) { list = []; drawnTurns.set(owner, list); }
+					list.push({ turn: nativeTurn, hasInput: entry.input === 1 });
+				} else {
+					hidden.add(owner);
+					hiddenNative.add(nativeTurn);
+				}
+				if (entry.input === 1) input.add(nativeTurn);
 			}
-			return { drawn: drawn, hidden: hidden, input: input };
+			return { drawn: drawn, drawnTurns: drawnTurns, hidden: hidden, hiddenNative: hiddenNative, input: input };
 		}
-		// 这一段正文还画在别处：计划里有别的行画它，或者它自己那行不在例外里（照画）。
-		function tavernPlanDrawsBodyElsewhere(digest, plan, story) {
-			if (digest.drawn.has(story)) return true;
-			return !(plan && plan.turns && Object.prototype.hasOwnProperty.call(plan.turns, String(story)));
+		// 这一段正文还画在别处：计划里有别的行画它，或者（在不撞号的前提下）它自己那行不在例外里（照画）。
+		function tavernPlanDrawsBodyElsewhere(digest, plan, story, options) {
+			const excludeTurn = options && options.excludeTurn !== undefined ? Number(options.excludeTurn) : undefined;
+			const sessionId = options && options.sessionId !== undefined ? options.sessionId : undefined;
+			const entries = digest.drawnTurns && digest.drawnTurns.get(story);
+			if (entries) {
+				for (const item of entries) {
+					if (excludeTurn !== undefined && item.turn === excludeTurn) continue;
+					// 跨轮搬移的重摇/修复副本只画回复不画输入（hasInput === false）；带输入的另一行若是同 story 的独立碰撞轮，不能冒充本行搬迁目标。
+					if (!item.hasInput) return true;
+					if (excludeTurn === undefined || (item.turn === story && (sessionId === undefined || !tavernShownBodies.hasEarlierOwner(sessionId, story, item.turn)))) return true;
+				}
+			} else if (digest.drawn && digest.drawn.has(story)) {
+				return true;
+			}
+			if (plan && plan.turns && Object.prototype.hasOwnProperty.call(plan.turns, String(story))) return false;
+			if (excludeTurn === undefined || sessionId === undefined) return true;
+			return excludeTurn !== story
+				&& tavernShownBodies.shown(sessionId, story)
+				&& tavernShownBodies.storyOf(sessionId, story) === story
+				&& !tavernShownBodies.hasEarlierOwner(sessionId, story, story);
 		}
 		// 计划这次是不是要把一段已经画出来的正文从屏幕上抹掉（而不是搬到别处）：这一轮本身
 		// 还在（玩家的输入还画着）、计划把它这一行的正文收掉、又没有别的行画同一段正文。
@@ -252,9 +293,18 @@
 			if (regenerating !== true) return false;
 			const value = Number(turn);
 			if (!tavernShownBodies.shown(sessionId, value)) return false;
+			const entry = plan && plan.turns ? plan.turns[String(value)] : null;
+			const rowHidden = entry ? entry.reply !== 1 : (digest.hiddenNative ? digest.hiddenNative.has(value) : digest.hidden.has(value));
+			if (!rowHidden) return false;
 			const story = tavernShownBodies.storyOf(sessionId, value);
-			if (!digest.hidden.has(story) || !digest.input.has(story)) return false;
-			return !tavernPlanDrawsBodyElsewhere(digest, plan, story);
+			// 用原生轮查输入；若本行是搬家后的无输入副本（且非同号新轮），仅回查同段故事中更早且自身正文已被隐藏的原生输入行。
+			const hasInput = digest.input.has(value)
+				|| ((value !== story || !tavernShownBodies.hasEarlierOwner(sessionId, story, value))
+					&& tavernShownBodies.shownTurnsForStory(sessionId, story).some(function (nativeTurn) {
+						return nativeTurn < value && digest.hiddenNative.has(nativeTurn) && digest.input.has(nativeTurn);
+					}));
+			if (!hasInput) return false;
+			return !tavernPlanDrawsBodyElsewhere(digest, plan, story, { excludeTurn: value, sessionId: sessionId });
 		}
 		function tavernPlanErasesRowForRender(sessionId, plan, turn, regenerating) {
 			return tavernPlanErasesRow(sessionId, plan, tavernPlanBodyDigest(plan), turn, regenerating);

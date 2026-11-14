@@ -29,10 +29,15 @@ function chatRounds(chat) {
       continue
     }
     if (message?.role !== 'assistant') continue
+    const assistantTurn = Number(message.turn) || 0
+    if (pending && pending.turn > 0 && assistantTurn > 0 && pending.turn !== assistantTurn) {
+      rounds.push({ ...pending, standalone: true })
+      pending = null
+    }
     // The native reply holds the raw model output (sourceText) unless an edit wrote the
     // projected text; both are this round. Saved texts are trimmed, native ones may not be.
     const texts = new Set([message.text, message.sourceText, message.projectionText].filter(value => typeof value === 'string').map(value => value.trim()))
-    rounds.push({ messageIndex: index, turn: Number(message.turn) || 0, greeting: message.greeting === true,
+    rounds.push({ messageIndex: index, turn: assistantTurn, greeting: message.greeting === true,
       userText: pending?.userText ?? null, replyText: String(message.text ?? ''), texts, anchor: message.nativeAnchor })
     pending = null
   }
@@ -206,14 +211,14 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
   const source = { kind: 'model', provider: 'dsh-tavern', model: 'native-repair' }
   const storySource = turn => Number.isSafeInteger(Number(turn)) && Number(turn) > 0 ? { ...source, tavernStoryTurn: Number(turn) } : source
   const anchors = []
-  let needSystemHead = session.header?.version >= 3 && session.surface.nodes.length === 0 && plan.rounds.length > 0
+  let needSystemHead = session.header?.version >= 3 && plan.keep === 0 && (session.surface.nodes.length === 0 || targets.length > 0)
   function writeSystemHead(turn, step) {
     if (!needSystemHead) return
     needSystemHead = false
-    mutator.append('system/message', { turn, step, message: {
+    write('system/message', { turn, step, message: {
       id: 'tavern-system-head:' + session.id, role: 'system', content: [],
       source: producerSource('@deepseek-ai/dsh-system-prompt', undefined, 'system'),
-    } }, { surfaceOp: 'append' })
+    } })
   }
   function writeRound(index, round, stepTurn, step) {
     const id = `tavern-native-repair:${repairId}:${index}`
@@ -227,6 +232,16 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
           ...(Number.isSafeInteger(roundTurn) && roundTurn > 0 ? { storyTurn: roundTurn } : {}),
         }
       : { id: repairId }
+    // 保留区之后若首轮仅含助手回复而待替换尾尚存：先写无副作用插件空占位替换旧尾，
+    // 确保随后每条真正可见的 assistant/message 均以 surfaceOp: 'append' 写入而不失真。
+    if (round.userText === null && pending) {
+      write('user/message', {
+        id: id + ':tombstone',
+        role: 'user',
+        content: [],
+        source: producerSource('dsh-tavern-context-window'),
+      })
+    }
     const input = round.userText === null ? null : write('user/message', { id: id + ':input', role: 'user',
       content: [{ type: 'text', text: round.userText }], source: { kind: 'user', repair: repairMarker } })
     if (round.standalone) return
@@ -237,6 +252,16 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
     const replyTurn = Number(reply?.data?.turn) || stepTurn
     anchors.push({ messageIndex: round.messageIndex, anchor: input ? roundAnchor(replyTurn, input, reply) : null, replyTurn })
   }
+  function writeEmptyTail(turn, step) {
+    writeSystemHead(turn, step)
+    if (!pending) return
+    write('user/message', {
+      id: `tavern-native-repair:${repairId}:empty`,
+      role: 'user',
+      content: [],
+      source: producerSource('dsh-tavern-context-window'),
+    })
+  }
   // 故事分叉初始化空白会话时按轮各自开启独立编辑回合，使轨迹视图按轮次逐轮显示历史。
   // 已有对局的局部上下文修复仍保持单回合写入，避免推动既有轮号并维持行计划假设。
   if (perRound && plan.rounds.length > 0) {
@@ -246,9 +271,9 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
         writeRound(index, round, turn, step)
       })
     }
-    if (pending) {
+    if (pending || needSystemHead) {
       mutator.editStep((turn, step) => {
-        write('assistant/message', { turn, step, message: { id: `tavern-native-repair:${repairId}:empty`, role: 'assistant', content: [], source } })
+        writeEmptyTail(turn, step)
       })
     }
   } else {
@@ -259,7 +284,7 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
       writeSystemHead(turn, step)
       for (const [index, round] of plan.rounds.entries()) writeRound(index, round, turn, step)
       // A stale tail with nothing to write in its place: shadow it with an empty node.
-      if (pending) write('assistant/message', { turn, step, message: { id: `tavern-native-repair:${repairId}:empty`, role: 'assistant', content: [], source } })
+      if (pending) writeEmptyTail(turn, step)
     })
   }
   return { applied: true, anchors }
@@ -276,13 +301,14 @@ export function repairNativeSurface(session, chat, options) {
  * reconcile repairs again. Returns false when there is nothing to write. */
 export function recordNativeSurfaceRepair(current, repaired, anchors) {
   let changed = false
-  if (current.nativeSync) { delete current.nativeSync; changed = true }
+  let appliedAny = false
   for (const { messageIndex, anchor, replyTurn } of anchors) {
     const row = current.messages?.[messageIndex], read = repaired.messages?.[messageIndex]
     // Missing legacy turns are equal to themselves; NaN !== NaN must not make an
     // unchanged row keep an anchor into the source Session after a story fork.
     const sameTurn = Object.is(row?.turn, read?.turn) || Number(row?.turn) === Number(read?.turn)
     if (row?.role !== 'assistant' || row.text !== read?.text || !sameTurn) continue
+    appliedAny = true
     // A reply whose input was deleted has no valid pair anchor. Clear the stale
     // anchor instead of leaving it to resolve against an older reply (often the
     // opening) on every subsequent reconciliation.
@@ -312,5 +338,7 @@ export function recordNativeSurfaceRepair(current, repaired, anchors) {
     // The rewritten reply already carries the edit; replaying the marker would target a shadowed node.
     delete row.bodyEdit
   }
+  const emptyCompatible = anchors.length === 0 && (current.messages?.length || 0) === (repaired?.messages?.length || 0)
+  if (current.nativeSync && (appliedAny || emptyCompatible)) { delete current.nativeSync; changed = true }
   return changed
 }

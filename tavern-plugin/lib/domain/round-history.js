@@ -1266,6 +1266,10 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     applyRollbackHeader(rolled, { undo, hiddenTurn, regeneratedVisibleTurn, rollbackCommitKey })
     rolled.regeneratedDshTurns = structuredClone(regeneratedDshTurns)
     delete rolled.regeneratedDshTurns[String(hiddenTurn)]
+    // 写入方有两种口径（剧情轮号 / 原生轮号）；删的时候两种都清，免得留下过期映射把别的轮认成本轮。
+    for (const [key, value] of Object.entries(rolled.regeneratedDshTurns)) {
+      if (Number(value) === Number(hiddenTurn)) delete rolled.regeneratedDshTurns[key]
+    }
     const changes = diffJson({ ...header, messages: [] }, rolled).filter(change => !['_storageRevision', 'updatedAt'].includes(change.path[0]))
     if (changes.some(change => change.path[0] === 'messages' || change.path[0] === 'id')) return undefined
     if (count > restoredCount) changes.push({ op: 'splice', path: ['messages'], index: restoredCount, deleteCount: count - restoredCount, items: [] })

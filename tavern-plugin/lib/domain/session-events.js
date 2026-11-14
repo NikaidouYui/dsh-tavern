@@ -73,9 +73,18 @@ const suppressedEditLifecycles = new WeakSet()
 
 /** 批量抑制非必要的编辑生命周期副作用（如故事分叉批量播种期间）。 */
 export function withSuppressedEditLifecycle(session, work) {
-  if (!session || typeof session !== 'object' || suppressedEditLifecycles.has(session)) return work()
+  if (typeof work !== 'function') throw new TypeError('withSuppressedEditLifecycle 的回调必须是同步函数')
+  const runSync = () => {
+    const outcome = work()
+    if (outcome !== null && (typeof outcome === 'object' || typeof outcome === 'function') && typeof outcome.then === 'function') {
+      if (typeof outcome.catch === 'function') outcome.catch(() => {})
+      throw new TypeError('withSuppressedEditLifecycle 仅支持同步回调，不得返回 Promise 或 thenable')
+    }
+    return outcome
+  }
+  if (!session || typeof session !== 'object' || suppressedEditLifecycles.has(session)) return runSync()
   suppressedEditLifecycles.add(session)
-  try { return work() } finally { suppressedEditLifecycles.delete(session) }
+  try { return runSync() } finally { suppressedEditLifecycles.delete(session) }
 }
 
 /** 当前会话的编辑事件是否处于静默初始化抑制期。 */
@@ -85,13 +94,20 @@ export function isEditLifecycleSuppressed(session) {
 
 /** Note a turn Tavern opens only to carry its own write; call before its turn/start. */
 export function markSurfaceEditTurn(session, turn) {
-  const marked = surfaceEditTurns.get(session) || new Set()
-  surfaceEditTurns.set(session, new Set([...marked, Number(turn)].slice(-16)))
+  if (!session || typeof session !== 'object') return
+  let marked = surfaceEditTurns.get(session)
+  if (!marked) surfaceEditTurns.set(session, marked = new Set())
+  marked.add(Number(turn))
 }
 
 /** Whether this turn of the session only carries a Tavern edit (no player message, no model reply). */
 export function isSurfaceEditTurn(session, turn) {
   return Boolean(session && surfaceEditTurns.get(session)?.has(Number(turn)))
+}
+
+/** 清除当前会话上登记的临时表面编辑轮号标记（用于事务性回滚恢复）。 */
+export function clearSurfaceEditTurns(session) {
+  if (session && typeof session === 'object') surfaceEditTurns.delete(session)
 }
 
 export function withSurfaceEditTurn(session, agent, write) {

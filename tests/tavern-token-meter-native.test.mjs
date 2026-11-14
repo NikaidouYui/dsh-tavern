@@ -193,3 +193,135 @@ test('分叉按轮播种后原生 Token Meter 准确计量且 BasicCompactionEng
   assert.deepEqual(session.snapshotEvents().slice(0, beforeEvents.length), beforeEvents)
   assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
 })
+
+test('createStoryReconciliation.seedNativeStory 从全空 V4 会话建固定前缀+按轮播种，继以新对话、重摇替换及连续两轮压缩仍保护系统前缀与正常计量', native, async t => {
+  const { ctx, Session } = await harness(t)
+  const { BasicCompactionEngine } = await import(new URL('../../dsh-compaction-basic/lib/index.js', pathToFileURL(process.env.DSH_BOOT_MODULE)))
+  const { createStoryReconciliation } = await import('../tavern-plugin/lib/domain/story-reconciliation.js')
+  const { createSessionSurfaceMutator } = await import('../tavern-plugin/lib/domain/session-surface-mutations.js')
+  const { sessionEvents } = await import('../tavern-plugin/lib/domain/session-events.js')
+  const { producerSource } = await import('../tavern-plugin/lib/domain/message-source.js')
+
+  const compactedInputs = []
+  class FixtureCompaction extends BasicCompactionEngine {
+    async summarize(input) {
+      compactedInputs.push(structuredClone(input))
+      return { summary: [{ type: 'text', text: `剧情压缩摘要#${compactedInputs.length}` }], provider: 'fixture', model: 'summary', maxTokens: 128 }
+    }
+  }
+  const engine = new FixtureCompaction(ctx, { auto: false })
+  t.after(installTavernTokenMeter(ctx.tokenMeter))
+
+  const session = ctx.sessions.create('seed-rec-compaction', { meta: { agentPreset: 'tavern' } })
+  const agent = { session, phase: { kind: 'idle' } }
+  const longA = '第一轮超长设定与铺垫。'.repeat(60)
+  const longB = '第二轮复杂动作与长回复。'.repeat(60)
+  let saved = {
+    id: 'chat-seed-rec-compact',
+    mode: 'story',
+    forkedFrom: { chatId: 'src-chat', round: 2 },
+    nativeOpeningAppended: false,
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场白' },
+      { role: 'user', text: '进入酒馆' },
+      { role: 'assistant', turn: 2, text: longA },
+      { role: 'user', text: '与掌柜交谈' },
+      { role: 'assistant', turn: 3, text: longB },
+    ]
+  }
+  const fixedPrefix = '固定系统角色卡设定与持久规则前缀。'
+  const rec = createStoryReconciliation({
+    agentRegistry: { get: id => (id === session.id ? agent : undefined) },
+    sessionStore: { get: id => (id === session.id ? session : undefined), flush: async () => session },
+    chatForSession: async () => structuredClone(saved),
+    chatSliceForSession: async () => ({ chat: structuredClone(saved), total: saved.messages.length, omitted: 0 }),
+    updateChat: async (_id, mutate) => { const next = mutate(structuredClone(saved)); if (next) saved = next; return saved },
+    turns: { finalize: async () => {} },
+    ensurePrefix: async (target) => {
+      const m = createSessionSurfaceMutator(target, sessionEvents(target))
+      m.editStep((turn, step) => {
+        m.append('system/message', {
+          turn,
+          step,
+          message: { id: 'fixed-sys-prefix', role: 'system', content: [{ type: 'text', text: fixedPrefix }], source: producerSource('@deepseek-ai/dsh-system-prompt', undefined, 'system') }
+        }, { surfaceOp: 'append' })
+      })
+    }
+  })
+
+  const seeded = await rec.seedNativeStory(session.id, session, 'e2e-meter-compact')
+  assert.equal(seeded.applied, true)
+  assert.equal(seeded.prefixed, true)
+  const afterSeedTokens = ctx.tokenMeter.measure(session).totalTokens
+  assert.ok(afterSeedTokens > 0)
+  const headSeqBefore = session.surface.nodes[0]
+
+  // 继续正常玩一轮（turn 5）：完整 turn/start -> user/message -> step/start -> assistant/message -> step/end -> turn/end
+  const nextTurn = Number(agent.phase.lastTurn) + 1
+  assert.equal(nextTurn, 5, 'seedNativeStory 后 agent.phase.lastTurn 必须同步推进至 4，确保下一轮为 5 不撞号')
+  const longC = '第三轮新对话扩展长文正文内容。'.repeat(60)
+  appendSessionEvent(session, 'turn/start', { turn: nextTurn })
+  appendSessionEvent(session, 'user/message', { id: `u-${nextTurn}`, role: 'user', content: [{ type: 'text', text: '进一步追问线索' }], source: { kind: 'user', rpcId: 'rpc-next' } }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/start', { turn: nextTurn, step: 1 })
+  const rNew = appendSessionEvent(session, 'assistant/message', {
+    turn: nextTurn, step: 1,
+    message: { id: `a-${nextTurn}`, role: 'assistant', content: [{ type: 'text', text: longC }], source: { ...source, tavernStoryTurn: 4 } }
+  }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/end', { turn: nextTurn, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: nextTurn, reason: { kind: 'completed' } })
+  const afterNewTokens = ctx.tokenMeter.measure(session).totalTokens
+  assert.ok(afterNewTokens > afterSeedTokens)
+
+  // 对该新轮执行重摇 replace（attempt + replace）后计量依然正常无错
+  const regenTurn = nextTurn + 1
+  const editTurn = nextTurn + 2
+  appendSessionEvent(session, 'turn/start', { turn: regenTurn })
+  appendSessionEvent(session, 'user/message', { id: 'regen-t', role: 'user', content: [], source: { kind: 'plugin:dsh-tavern-regen', regenerationId: 'rg-m1' } }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/start', { turn: regenTurn, step: 1 })
+  const longD = '重摇后的超长新版本回复正文内容。'.repeat(65)
+  const aRegen = appendSessionEvent(session, 'assistant/message', {
+    turn: regenTurn, step: 1,
+    message: { id: `a-${regenTurn}`, role: 'assistant', content: [{ type: 'text', text: longD }], source }
+  }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/end', { turn: regenTurn, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: regenTurn, reason: { kind: 'completed' } })
+  const shadowed = sessionEvents(session).slice(sessionEvents(session).findIndex(e => e.seq === rNew.seq), sessionEvents(session).findIndex(e => e.seq === aRegen.seq) + 1)
+    .filter(e => e.type === 'user/message' || e.type === 'assistant/message').map(e => e.seq)
+  appendSessionEvent(session, 'turn/start', { turn: editTurn })
+  appendSessionEvent(session, 'step/start', { turn: editTurn, step: 1 })
+  appendSessionEvent(session, 'assistant/message', {
+    turn: editTurn, step: 1,
+    message: { id: `a-${editTurn}`, role: 'assistant', content: [{ type: 'text', text: longD }], source: { ...source, tavernStoryTurn: 4 } }
+  }, { surfaceOp: { op: 'replace', start: rNew.seq, end: aRegen.seq }, sourceEventSeqs: shadowed })
+  appendSessionEvent(session, 'step/end', { turn: editTurn, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: editTurn, reason: { kind: 'completed' } })
+  assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
+
+  // 第一次压缩：保护 node[0] 系统头
+  const signal = new AbortController().signal
+  const c1 = await engine.compactNow({ session, options: {}, runMaintenance: fn => fn(signal) }, signal)
+  assert.ok(c1)
+  assert.equal(session.surface.nodes[0], headSeqBefore, '第1次压缩后 node[0] 固定系统前缀必须纹丝不动')
+  const headEvent1 = session.snapshotEvents().find(e => e.seq === session.surface.nodes[0])
+  assert.equal(headEvent1.type, 'system/message')
+  assert.equal(headEvent1.data.message.content[0].text, fixedPrefix)
+
+  // 再追加更多轮并触发第二次连续压缩：固定系统前缀持续受到保护且 V4 会话可恢复
+  const longE = '第四轮大段新增剧情推进长正文。'.repeat(70)
+  const extraTurn = editTurn + 1
+  appendSessionEvent(session, 'turn/start', { turn: extraTurn })
+  appendSessionEvent(session, 'user/message', { id: `u-${extraTurn}`, role: 'user', content: [{ type: 'text', text: '接着呢' }], source: { kind: 'user', rpcId: 'rpc-e' } }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/start', { turn: extraTurn, step: 1 })
+  appendSessionEvent(session, 'assistant/message', {
+    turn: extraTurn, step: 1,
+    message: { id: `a-${extraTurn}`, role: 'assistant', content: [{ type: 'text', text: longE }], source: { ...source, tavernStoryTurn: 5 } }
+  }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/end', { turn: extraTurn, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: extraTurn, reason: { kind: 'completed' } })
+
+  const c2 = await engine.compactNow({ session, options: {}, runMaintenance: fn => fn(signal) }, signal)
+  assert.ok(c2)
+  assert.equal(session.surface.nodes[0], headSeqBefore, '连续第2次压缩后 node[0] 系统前缀依然受保护')
+  assert.doesNotThrow(() => Session.fromRestore(session.id, session.snapshotEvents(), session.header, 0, 'detached'))
+  assert.ok(ctx.tokenMeter.measure(session).totalTokens > 0)
+})

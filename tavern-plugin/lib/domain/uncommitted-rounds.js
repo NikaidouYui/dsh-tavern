@@ -19,27 +19,25 @@ export function uncommittedRounds(session, header = {}) {
   const committed = Object.keys(commits).map(Number).filter(Number.isSafeInteger)
   // Legacy saves without commit records cannot be judged: leave them alone.
   if (!committed.length) return []
-  const regenerated = header.regeneratedDshTurns && typeof header.regeneratedDshTurns === 'object' ? Object.values(header.regeneratedDshTurns).map(Number) : []
+  const regenerated = header.regeneratedDshTurns && typeof header.regeneratedDshTurns === 'object' ? Object.values(header.regeneratedDshTurns).map(Number).filter(Number.isSafeInteger) : []
   const skipped = new Set([...(Array.isArray(header.suppressedDshTurns) ? header.suppressedDshTurns : []), ...regenerated].map(Number))
-  // nativeCommits 的键是剧情轮号，regeneratedDshTurns 的值是宿主轮号：
-  // 上界按剧情轮号算，宿主轮号先经映射换回剧情轮号再比。
-  const latest = Math.max(...committed, ...Object.values(header.regeneratedDshTurns || {}).map(Number).filter(Number.isSafeInteger))
+  // nativeCommits 的键与 regeneratedDshTurns 的值均是宿主原生轮号，与 turn/end、
+  // inputEventForTurn、assistantResultForTurn 和 roundAnchor 同属原生轮坐标系。
+  const latest = Math.max(...committed, ...regenerated)
   const nodes = new Set((session.surface?.nodes || []).map(Number))
   const rounds = []
-  const inverse = new Map(Object.entries(header.regeneratedDshTurns || {}).map(([story, host]) => [Number(host), Number(story)]))
   for (const event of sessionEvents(session)) {
     if (event?.type !== 'turn/end') continue
     const hostTurn = storyEventTurn(event)
-    const turn = inverse.get(hostTurn) ?? hostTurn
-    if (!(turn > latest) || skipped.has(hostTurn) || isFailedTurnEnd(event.data?.reason?.kind)) continue
-    const inputEvent = inputEventForTurn(session, turn), input = inputEvent?.data
+    if (!(hostTurn > latest) || skipped.has(hostTurn) || isFailedTurnEnd(event.data?.reason?.kind)) continue
+    const inputEvent = inputEventForTurn(session, hostTurn), input = inputEvent?.data
     if (!input || input.source?.kind !== 'user') continue
-    const reply = assistantResultForTurn(session, turn)
+    const reply = assistantResultForTurn(session, hostTurn)
     // The reply must still be what the model sees: a rolled-back round is tombstoned.
     // 投影/修复写回会把正文换成新的 seq，位置变了但正文还在面上，就算仍然可见。
     if (!reply || reply.text === '') continue
     if (!nodes.has(Number(reply.event.seq)) && !surfaceShowsText(session, nodes, reply.text)) continue
-    rounds.push({ turn, requestId: String(input.source.rpcId ?? '').trim(), userText: contentText(input), userContent: input.content || [], assistantText: reply.text, nativeAnchor: roundAnchor(turn, inputEvent, reply.event) })
+    rounds.push({ turn: hostTurn, requestId: String(input.source.rpcId ?? '').trim(), userText: contentText(input), userContent: input.content || [], assistantText: reply.text, nativeAnchor: roundAnchor(hostTurn, inputEvent, reply.event) })
   }
   return rounds.sort((left, right) => left.turn - right.turn)
 }

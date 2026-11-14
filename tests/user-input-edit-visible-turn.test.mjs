@@ -63,3 +63,83 @@ test('回退后，编辑入口认的是页面剩下的最后一条输入，不�
   // carries a plan in play mode, but the helper must not throw on a host without one.
   assert.equal(client.latestTavernUserTurn({ legacy: { nodes } }, null), 10)
 })
+
+async function loadTurnHistoryGuards() {
+  const { parse } = await import('acorn')
+  const ast = parse(source, { ecmaVersion: 'latest', sourceType: 'module' })
+  let shownDecl = ''
+  function visit(node) {
+    if (!node || typeof node !== 'object') return
+    if (node.type === 'VariableDeclaration' && node.declarations?.some(d => d.id?.name === 'tavernShownBodies')) {
+      shownDecl = source.slice(node.start, node.end)
+    }
+    for (const v of Object.values(node)) {
+      if (Array.isArray(v)) v.forEach(visit)
+      else if (v && typeof v === 'object') visit(v)
+    }
+  }
+  visit(ast)
+  assert.ok(shownDecl, 'client.js 中应存在 tavernShownBodies 定义')
+  const fnNames = ['tavernPlanBodyDigest', 'tavernPlanDrawsBodyElsewhere', 'tavernPlanErasesRow', 'tavernPlanErasesRowForRender']
+  return vm.runInNewContext([
+    shownDecl,
+    ...fnNames.map(name => sourceFunction(source, name)),
+    '({ tavernShownBodies, tavernPlanBodyDigest, tavernPlanDrawsBodyElsewhere, tavernPlanErasesRow, tavernPlanErasesRowForRender })',
+  ].join('\n'), { Object, Map, Set, Number, String, Array })
+}
+
+test('客户端防抹除与撞号隔离：区分搬迁副本与同 story 独立撞号轮，支持二次重摇回查与真实回退精准擦除', async () => {
+  const g = await loadTurnHistoryGuards()
+
+  // 场景 1：跳号分叉轮 native=2 (story=7) 在重摇进行中遭遇脏计划隐藏正文且无别处无输入副本 -> 保护老第 2 轮不被擦白；
+  // 即使后续撞号续聊轮 native=7 (story=7) 也已在屏幕展示且仍在正常绘制，也不能把带输入的独立撞号轮 7 当成 native=2 的搬迁目标。
+  const sid1 = 'guard-collision-s'
+  g.tavernShownBodies.remember(sid1, 2, 7)
+  g.tavernShownBodies.remember(sid1, 7, 7)
+  const dirtyCollisionPlan = {
+    from: null,
+    turns: {
+      2: { input: 1, reply: 0 },
+      7: { input: 1, reply: 1 },
+    }
+  }
+  assert.equal(g.tavernPlanErasesRowForRender(sid1, dirtyCollisionPlan, 2, true), true, '撞号新轮 native=7 存在时，老分叉轮 native=2 重摇脏态必须受保护')
+  assert.equal(g.tavernPlanErasesRowForRender(sid1, dirtyCollisionPlan, 2, false), false, '非重摇期间（用户主动删除）允许按计划隐藏')
+
+  // 场景 1b：真实回退撞号新轮 native=7（{ input: 0, reply: 0 }）与真实回退老轮 native=2（{ input: 0, reply: 0 }） -> 即使在重摇态也精准允许擦除。
+  const rollbackNewPlan = {
+    from: null,
+    turns: { 2: { input: 1, reply: 1, story: 7 }, 7: { input: 0, reply: 0 } }
+  }
+  assert.equal(g.tavernPlanErasesRowForRender(sid1, rollbackNewPlan, 7, true), false, '撞号新轮 7 自身输入已消亡时不误借用老第 2 轮输入而阻拦回退')
+  const rollbackOldPlan = {
+    from: null,
+    turns: { 2: { input: 0, reply: 0 }, 7: { input: 1, reply: 1 } }
+  }
+  assert.equal(g.tavernPlanErasesRowForRender(sid1, rollbackOldPlan, 2, true), false, '老轮 2 输入已回退清零时不阻拦擦除')
+
+  // 场景 1c：当 native=2 真正完成搬移（native=5 出现无输入副本 { input: 0, reply: 1, story: 7 }）时，允许旧行 native=2 收起正文。
+  const movedPlan = {
+    from: null,
+    turns: {
+      2: { input: 1, reply: 0 },
+      5: { input: 0, reply: 1, story: 7 },
+    }
+  }
+  assert.equal(g.tavernPlanDrawsBodyElsewhere(g.tavernPlanBodyDigest(movedPlan), movedPlan, 7, { excludeTurn: 2, sessionId: sid1 }), true)
+  assert.equal(g.tavernPlanErasesRowForRender(sid1, movedPlan, 2, true), false)
+
+  // 场景 2：二次重摇保护（native=5 曾作为 story=7 的无输入搬移副本显示过），再次重摇时 native=5 自身无 input，
+  // 需顺沿 story=7 回查到仍在场上的原生输入轮 native=2 的 input，从而保护 native=5 不在二次重摇脏态下消失。
+  const sid2 = 'guard-double-regen-s'
+  g.tavernShownBodies.remember(sid2, 2, 7)
+  g.tavernShownBodies.remember(sid2, 5, 7)
+  const secondRegenDirtyPlan = {
+    from: null,
+    turns: {
+      2: { input: 1, reply: 0 },
+      5: { input: 0, reply: 0 },
+    }
+  }
+  assert.equal(g.tavernPlanErasesRowForRender(sid2, secondRegenDirtyPlan, 5, true), true, '搬移副本 native=5 二次重摇应通过回查 native=2 输入得到保护')
+})

@@ -435,3 +435,27 @@ test('正文替换预检每场会话只做一次', async t => {
   await h.rounds.regenerate('chat', '', 'session')
   assert.equal(probes, 1)
 })
+
+test('bounded rollbackRecent 清除指向 hiddenTurn 的反向 regeneratedDshTurns 映射，且与全量回退一致', async t => {
+  const outcomes = []
+  for (const bounded of [true, false]) {
+    const h = await fixture(t, bounded)
+    // 第 81 轮重摇后落地在原生第 82 轮：regeneratedDshTurns['81'] === 82，另预留一个无关旧映射 '80': 80
+    await h.rounds.regenerate('chat', '', 'session')
+    await h.p.update('chat', current => {
+      current.regeneratedDshTurns = { ...(current.regeneratedDshTurns || {}), 80: 80 }
+      return current
+    }, { source: 'test.seed-other-mapping' })
+    const beforeRollback = await h.p.read('chat')
+    assert.equal(beforeRollback.regeneratedDshTurns['81'], 82)
+    h.calls.length = 0
+
+    await h.rounds.rollback('session', 'chat', 81)
+    const after = await h.p.read('chat')
+    if (bounded) assert.ok(h.calls.includes('patch:rollback'), JSON.stringify(h.calls))
+    assert.equal(after.regeneratedDshTurns['81'], undefined, '指向 hiddenTurn(82) 的反向 story key(81) 必须被清除')
+    assert.deepEqual(after.regeneratedDshTurns, { 80: 80 })
+    outcomes.push(after.regeneratedDshTurns)
+  }
+  assert.deepEqual(outcomes[0], outcomes[1])
+})

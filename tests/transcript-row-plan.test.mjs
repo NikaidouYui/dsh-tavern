@@ -97,3 +97,322 @@ test('#311 旧存档：只画存档里五轮各一份输入与正文，修复副
   assert.deepEqual(shown('assistant-step'), [1, 2, 3, 11, 14])
   assert.deepEqual([11, 14].map(turn => planStoryTurn(plan, turn)), [5, 12])
 })
+
+const seededUser = (seq, { standalone = false, storyTurn = null, text = '前置输入' } = {}) => ({
+  seq,
+  type: 'user/message',
+  surfaceOp: 'append',
+  data: {
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: {
+      kind: 'user',
+      repair: {
+        id: 'seed-test',
+        seeded: true,
+        ...(standalone ? { standalone: true } : {}),
+        ...(storyTurn !== null ? { storyTurn } : {}),
+      }
+    }
+  }
+})
+
+const seededReply = (seq, turn, storyTurn, text = '播种正文') => ({
+  seq,
+  type: 'assistant/message',
+  surfaceOp: 'append',
+  data: {
+    turn,
+    step: 1,
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      source: { kind: 'model', provider: 'dsh-tavern', model: 'native-repair', tavernStoryTurn: storyTurn }
+    }
+  }
+})
+
+test('跳号分叉+重摇跨窗口与 keep===0 下 planTranscriptWindow({ partial: true }) 及增量 fold 与全量完全一致', () => {
+  // 构建长前置分叉会话：1=开场，2..3=两句前置 standalone，4=跳号第6轮，5=attempt重摇，6=replace第6轮，7..10=新普通轮
+  const events = []
+  const push = ev => { const seq = events.length; const item = { ...ev, seq }; events.push(item); return item }
+  // native 1: 开场 (story 1)
+  push(mark(0, 'turn/start', 1))
+  push(seededUser(0, { storyTurn: 1, text: '' }))
+  push(seededReply(0, 1, 1, '开场白'))
+  push(mark(0, 'step/end', 1))
+  push(mark(0, 'turn/end', 1))
+  // native 2, 3: 两条无轮号前置 standalone
+  push(mark(0, 'turn/start', 2))
+  push(seededUser(0, { standalone: true, text: '前置1' }))
+  push(mark(0, 'turn/end', 2))
+  push(mark(0, 'turn/start', 3))
+  push(seededUser(0, { standalone: true, text: '前置2' }))
+  push(mark(0, 'turn/end', 3))
+  // native 4: seeded 第6轮
+  push(mark(0, 'turn/start', 4))
+  const u6 = push(seededUser(0, { storyTurn: 6, text: '行动6' }))
+  const a6 = push(seededReply(0, 4, 6, '原正文6'))
+  push(mark(0, 'step/end', 4))
+  push(mark(0, 'turn/end', 4))
+  // native 5 + 6: 对第6轮执行重摇（attempt 5 + replace 6），将 reply 移至原生 5
+  push(mark(0, 'turn/start', 5))
+  push(input(0, { kind: 'plugin', plugin: 'dsh-tavern-regen' }))
+  const a5 = push(reply(0, 5, '重摇6'))
+  push(mark(0, 'step/end', 5))
+  push(mark(0, 'turn/end', 5))
+  push(mark(0, 'turn/start', 6))
+  push({
+    type: 'assistant/message',
+    surfaceOp: { op: 'replace', start: a6.seq, end: a5.seq },
+    data: { turn: 6, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '重摇6' }], ...story(6) } }
+  })
+  push(mark(0, 'step/end', 6))
+  push(mark(0, 'turn/end', 6))
+  // native 7..10: 后续普通玩家回合
+  for (const t of [7, 8, 9, 10]) {
+    const base = events.length
+    events.push(...round(base, t, `正文${t}`))
+  }
+
+  const allMessages = [
+    { role: 'assistant', turn: 1, greeting: true },
+    { role: 'user', text: '前置1' },
+    { role: 'user', text: '前置2' },
+    { role: 'user', text: '行动6' },
+    { role: 'assistant', turn: 6, nativeAnchor: { formatVersion: 4, turn: 4, input: u6.seq, reply: a6.seq } },
+    ...floors([7, 8, 9, 10]),
+  ]
+  const whole = planTranscriptRows({ chat: { messages: allMessages }, events })
+
+  // 窗口 A：从前置2（缺前置1）及之后截取，检验窗口向前回溯至前置 standalone 且 from 真实可靠。
+  const winA = planTranscriptWindow({ messages: allMessages.slice(2), events, partial: true })
+  assert.ok(winA.from !== null && winA.from <= 3)
+  for (let turn = 1; turn <= 10; turn++) {
+    for (const kind of ['user', 'assistant-step']) {
+      if (turn >= winA.from) assert.equal(planShowsRow(winA.turns, { turn, kind }, winA.from), planShowsRow(whole, { turn, kind }), `winA native=${turn} ${kind}`)
+    }
+    if (turn >= winA.from) assert.equal(planStoryTurn(winA.turns, turn), planStoryTurn(whole, turn))
+  }
+
+  // 窗口 B：仅从第6轮（含配对 user 行动6）截入，校验重摇跨窗口与 keep===0 增量 fold 等价性。
+  const winB = planTranscriptWindow({ messages: allMessages.slice(3), events, partial: true })
+  assert.ok(winB.from !== null && winB.from <= 4)
+  assert.equal(planShowsRow(winB.turns, { turn: 4, kind: 'user' }, winB.from), true)
+  assert.equal(planShowsRow(winB.turns, { turn: 4, kind: 'assistant-step' }, winB.from), false)
+  assert.equal(planShowsRow(winB.turns, { turn: 5, kind: 'assistant-step' }, winB.from), true)
+  assert.equal(planStoryTurn(winB.turns, 5), 6)
+
+  // keep === 0（无保留轮全空起步）增量逐事件喂入 + 分批 setFloors 与全量计划完全一致。
+  const fold = createTranscriptFold()
+  fold.setFloors(0, [])
+  for (let i = 0; i < events.length; i++) {
+    fold.addEvents(events.slice(0, i + 1))
+    if (i === 18) fold.setFloors(0, allMessages.slice(0, 5))
+    if (i === 28) fold.setFloors(5, allMessages.slice(5, 9))
+    fold.result()
+  }
+  fold.setFloors(9, allMessages.slice(9))
+  assert.deepEqual(plain(fold.result()), plain(whole))
+})
+
+test('无轮号尾部 pendingSeededStandalone 遇普通轮 error 失败重开不丢失，被 replace 覆盖后不再幽灵复活', () => {
+  const events = []
+  const push = ev => { const seq = events.length; const item = { ...ev, seq }; events.push(item); return item }
+  push(mark(0, 'turn/start', 1))
+  push(seededUser(0, { storyTurn: 1, text: '' }))
+  push(seededReply(0, 1, 1, '开场'))
+  push(mark(0, 'turn/end', 1))
+  // 尾部两句无 storyTurn 的 seeded standalone
+  push(mark(0, 'turn/start', 2))
+  push(seededUser(0, { standalone: true, text: '尾悬空A' }))
+  push(mark(0, 'turn/end', 2))
+  push(mark(0, 'turn/start', 3))
+  const u3 = push(seededUser(0, { standalone: true, text: '尾悬空B' }))
+  push(mark(0, 'turn/end', 3))
+
+  const baseChat = {
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true },
+      { role: 'user', text: '尾悬空A' },
+      { role: 'user', text: '尾悬空B' },
+    ]
+  }
+  // 后续第 4 轮先失败（error），未写入 chat。
+  push(mark(0, 'turn/start', 4))
+  push(input(0))
+  push(reply(0, 4, '失败半截'))
+  push(mark(0, 'step/end', 4))
+  push({ type: 'turn/end', data: { turn: 4, reason: { kind: 'error' } } })
+
+  const duringErr = planTranscriptRows({ chat: baseChat, events })
+  assert.equal(planShowsRow(duringErr, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(duringErr, { turn: 3, kind: 'user' }), true)
+  assert.equal(planShowsRow(duringErr, { turn: 4, kind: 'user' }), true)
+
+  // 再开第 5 轮普通玩家回合成功并落盘到 chat：两条 tailStandalone 依然稳定显示。
+  events.push(...round(events.length, 5, '正式第5轮'))
+  const afterSuccessChat = {
+    messages: [...baseChat.messages, { role: 'user', turn: 5 }, { role: 'assistant', turn: 5 }]
+  }
+  const afterSuccess = planTranscriptRows({ chat: afterSuccessChat, events })
+  assert.equal(planShowsRow(afterSuccess, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(afterSuccess, { turn: 3, kind: 'user' }), true)
+  assert.equal(planShowsRow(afterSuccess, { turn: 5, kind: 'assistant-step' }), true)
+
+  // 删掉最老的一条尾悬空（A）只剩一条：尾部优先留存 native 3、隐藏 native 2。
+  const trimOneChat = {
+    messages: [baseChat.messages[0], baseChat.messages[2], { role: 'user', turn: 5 }, { role: 'assistant', turn: 5 }]
+  }
+  const afterTrimOne = planTranscriptRows({ chat: trimOneChat, events })
+  assert.equal(planShowsRow(afterTrimOne, { turn: 2, kind: 'user' }), false)
+  assert.equal(planShowsRow(afterTrimOne, { turn: 3, kind: 'user' }), true)
+
+  // 若一个非保留型 replace 范围抹除了 u3（如修复/回滚清理），即使存档里还留有对应位置用户消息也不幽灵复活 native 3。
+  const withReplace = [
+    ...events,
+    mark(events.length, 'turn/start', 6),
+    {
+      seq: events.length + 1,
+      type: 'user/message',
+      surfaceOp: { op: 'replace', start: u3.seq, end: u3.seq },
+      data: { id: 'cleanup', role: 'user', content: [], source: { kind: 'plugin:dsh-tavern-context-window' } }
+    },
+    mark(events.length + 2, 'turn/end', 6),
+  ]
+  const erasedPlan = planTranscriptRows({ chat: afterSuccessChat, events: withReplace })
+  assert.equal(planShowsRow(erasedPlan, { turn: 3, kind: 'user' }), false)
+  assert.equal(planShowsRow(erasedPlan, { turn: 2, kind: 'user' }), true)
+})
+
+test('多条显式同 storyTurn standalone 尾部逆序可逐条独立删减，openingInputDeleted 隐藏开场输入', () => {
+  const events = []
+  const push = ev => { const seq = events.length; const item = { ...ev, seq }; events.push(item); return item }
+  push(mark(0, 'turn/start', 1))
+  push(seededUser(0, { storyTurn: 1, text: '' }))
+  push(seededReply(0, 1, 1, '开场'))
+  push(mark(0, 'turn/end', 1))
+  // 同一 storyTurn = 5 下写入 2 条显式 standalone + 1 轮配对第 5 轮
+  push(mark(0, 'turn/start', 2))
+  push(seededUser(0, { standalone: true, storyTurn: 5, text: '补5-a' }))
+  push(mark(0, 'turn/end', 2))
+  push(mark(0, 'turn/start', 3))
+  push(seededUser(0, { standalone: true, storyTurn: 5, text: '补5-b' }))
+  push(mark(0, 'turn/end', 3))
+  push(mark(0, 'turn/start', 4))
+  push(seededUser(0, { storyTurn: 5, text: '配对5' }))
+  push(seededReply(0, 4, 5, '正文5'))
+  push(mark(0, 'turn/end', 4))
+
+  const full = [
+    { role: 'assistant', turn: 1, greeting: true, openingInputDeleted: true },
+    { role: 'user', turn: 5 },
+    { role: 'user', turn: 5 },
+    { role: 'user', turn: 5 },
+    { role: 'assistant', turn: 5 },
+  ]
+  const pFull = planTranscriptRows({ chat: { messages: full }, events })
+  // openingInputDeleted: true 隐藏第 1 轮开场输入但保留开场助手正文
+  assert.equal(planShowsRow(pFull, { turn: 1, kind: 'user' }), false)
+  assert.equal(planShowsRow(pFull, { turn: 1, kind: 'assistant-step' }), true)
+  assert.deepEqual([2, 3, 4].map(t => planShowsRow(pFull, { turn: t, kind: 'user' })), [true, true, true])
+
+  // 删掉一条前置 standalone 后，只隐藏最早的 native 2，保留 native 3 与配对 native 4
+  const minusOne = [full[0], full[2], full[3], full[4]]
+  const pMinusOne = planTranscriptRows({ chat: { messages: minusOne }, events })
+  assert.deepEqual([2, 3, 4].map(t => planShowsRow(pMinusOne, { turn: t, kind: 'user' })), [false, true, true])
+
+  // 再删一条只剩配对输入与助手：native 2 和 3 都隐藏，仅 native 4 展示
+  const onlyPaired = [full[0], full[3], full[4]]
+  const pPaired = planTranscriptRows({ chat: { messages: onlyPaired }, events })
+  assert.deepEqual([2, 3, 4].map(t => planShowsRow(pPaired, { turn: t, kind: 'user' })), [false, false, true])
+
+  // 再连同第 5 轮助手也删掉只剩一条 user(turn: 5)：配对退化入池，末尾优先保留 native 4、隐藏 native 2 和 3
+  const onlyOneUser = [full[0], full[3]]
+  const pOneUser = planTranscriptRows({ chat: { messages: onlyOneUser }, events })
+  assert.equal(planShowsRow(pOneUser, { turn: 4, kind: 'assistant-step' }), false)
+  assert.deepEqual([2, 3, 4].map(t => planShowsRow(pOneUser, { turn: t, kind: 'user' })), [false, false, true])
+
+  // 全删空（且无 openingInputDeleted）时恢复开场输入显示，第 5 轮全部隐藏
+  const bareOpening = [{ role: 'assistant', turn: 1, greeting: true }]
+  const pBare = planTranscriptRows({ chat: { messages: bareOpening }, events })
+  assert.equal(planShowsRow(pBare, { turn: 1, kind: 'user' }), true)
+  assert.deepEqual([2, 3, 4].map(t => planShowsRow(pBare, { turn: t, kind: 'user' })), [false, false, false])
+})
+
+test('分叉重摇后 currentOpen / attempt / keepInput 不把已提交旧 origin 误判为未落盘开放轮，保留正常失败重投 keepInput', () => {
+  const events = []
+  const push = ev => { const seq = events.length; const item = { ...ev, seq }; events.push(item); return item }
+  push(mark(0, 'turn/start', 1))
+  push(seededUser(0, { storyTurn: 1, text: '' }))
+  push(seededReply(0, 1, 1, '开场'))
+  push(mark(0, 'turn/end', 1))
+  push(mark(0, 'turn/start', 2))
+  const u2 = push(seededUser(0, { storyTurn: 2, text: '行动2' }))
+  const a2 = push(seededReply(0, 2, 2, '正文2'))
+  push(mark(0, 'turn/end', 2))
+  // 已提交过一轮重摇：attempt 3 + replace 4
+  push(mark(0, 'turn/start', 3))
+  push(input(0, { kind: 'plugin', plugin: 'dsh-tavern-regen' }))
+  const a3 = push(reply(0, 3, '重摇A'))
+  push(mark(0, 'turn/end', 3))
+  push(mark(0, 'turn/start', 4))
+  const r4 = push({
+    type: 'assistant/message',
+    surfaceOp: { op: 'replace', start: a2.seq, end: a3.seq },
+    data: { turn: 4, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '重摇A' }], ...story(2) } }
+  })
+  push(mark(0, 'turn/end', 4))
+  // 又触发一次正在进行中的重摇 attempt 5（无 playerInput），替换目标为旧 origin 2（其最新显示轮为 3）
+  push(mark(0, 'turn/start', 5))
+  push(input(0, { kind: 'plugin', plugin: 'dsh-tavern-regen' }))
+  push(reply(0, 5, '正在流式'))
+  push({ type: 'turn/end', data: { turn: 5, reason: { kind: 'error' } } })
+
+  const chatSaved = {
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true },
+      { role: 'user', text: '行动2' },
+      { role: 'assistant', turn: 2, nativeAnchor: { formatVersion: 4, turn: 2, input: u2.seq, reply: a2.seq } }
+    ]
+  }
+  const fold = createTranscriptFold()
+  fold.setFloors(0, chatSaved.messages.map(m => ({ role: m.role, turn: m.turn, greeting: m.greeting, nativeTurn: m.nativeAnchor?.turn })))
+  fold.addEvents(events, 0)
+  // 模拟一次针对 3（旧替代轮）的重摇正在运行；先前真正失败的轮 6 已被重投轮 7 接管重试，因此 keepInput([6]) 生效
+  push(mark(0, 'turn/start', 6))
+  push(input(0))
+  push({ type: 'turn/end', data: { turn: 6, reason: { kind: 'error' } } })
+  push(mark(0, 'turn/start', 7))
+  push(input(0, { kind: 'plugin', plugin: 'dsh-tavern-replay' }))
+  push({ type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } })
+  fold.addEvents(events, events.length - 6)
+  fold.setRegeneration({ replacing: [3], inProgress: true })
+  fold.setKeepInput([6])
+  const duringRegen = fold.result()
+
+  // 原先旧 origin 2 的输入必须保留，不能把已落盘的旧轮当成 open turn 而放行旧正文，也不能吞掉失败重投的 keepInput 轮 6
+  assert.notEqual(fold.open, 2)
+  assert.notEqual(fold.open, 3)
+  assert.equal(planShowsRow(duringRegen, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(duringRegen, { turn: 3, kind: 'assistant-step' }), false)
+  assert.equal(duringRegen['6']?.kept, 1)
+  assert.equal(planShowsRow(duringRegen, { turn: 6, kind: 'user' }), true)
+  assert.equal(planShowsRow(duringRegen, { turn: 6, kind: 'assistant-step' }), false)
+  assert.equal(fold.open, null)
+  // 撤销 replacing 并把 attempt 5 当作最后流式轮（去掉轮 6/7）检验 attempt 分支返回正确 story: 2
+  const foldAttempt = createTranscriptFold()
+  foldAttempt.setFloors(0, chatSaved.messages.map(m => ({ role: m.role, turn: m.turn, greeting: m.greeting, nativeTurn: m.nativeAnchor?.turn })))
+  foldAttempt.addEvents(events.slice(0, -7), 0)
+  foldAttempt.setRegeneration({ replacing: [3], inProgress: true })
+  const attemptPlan = foldAttempt.result()
+  assert.equal(attemptPlan['5']?.input, 0)
+  assert.equal(attemptPlan['5']?.reply, 1)
+  assert.equal(attemptPlan['5']?.story, 2)
+  assert.equal(planShowsRow(attemptPlan, { turn: 2, kind: 'user' }), true)
+  assert.equal(planShowsRow(attemptPlan, { turn: 3, kind: 'user' }), false)
+  assert.equal(planShowsRow(attemptPlan, { turn: 3, kind: 'assistant-step' }), false)
+  // 注意 r4 已归档为沉默 edit 轮（确保即使后续再生，r4 仍保持隐藏）
+  assert.equal(planShowsRow(attemptPlan, { turn: 4, kind: 'assistant-step' }), false)
+  assert.ok(r4.seq > a3.seq)
+})

@@ -206,10 +206,10 @@ export function registerTurnLifecycleHooks({
     // A new foreground request drops the previous reply's waiting automatic candidates.
     // A Tavern edit (精修 write-back, body edit) opens a turn of its own: not 玩家发送.
     const edit = isSurfaceEditTurn(session, event?.data?.turn)
-    const suppressed = edit && isEditLifecycleSuppressed(session)
+    const suppressed = isEditLifecycleSuppressed(session)
     if (event?.type === 'turn/start' && !backgroundAgentRunner.owns(session.id)) {
       if (!suppressed) autoChoices.cancel(session.id)
-      if (!edit) turnStarted?.(session.id, event.data?.turn)
+      if (!edit && !suppressed) turnStarted?.(session.id, event.data?.turn)
     }
     if (!event || event.type !== 'turn/end') return
     if (backgroundAgentRunner.owns(session.id)) return
@@ -220,10 +220,10 @@ export function registerTurnLifecycleHooks({
       // move any more; a target that changed in between drops its text instead.
       if (typeof flushQueuedBodyEdits === 'function') void flushQueuedBodyEdits(session.id)
     }
-    if (!edit) setTimeout(() => {
+    if (!edit && !suppressed) setTimeout(() => {
       synchronizeTemplateHistoryWhenIdle(session).catch(error => console.warn('dsh-tavern: 模板改写同步失败', session.id, error?.message || error))
     }, 0)
-    if (!edit) {
+    if (!edit && !suppressed) {
       const reply = assistantResultForTurn(session, event.data && event.data.turn)
       void autoChoices.completed({ sessionId: session.id, turn: event.data && event.data.turn, messageId: String(reply?.event?.data?.message?.id || ''), reason })
     }
@@ -231,7 +231,7 @@ export function registerTurnLifecycleHooks({
     // message, once the agent has gone idle; reconcile never blocks this hook. Only after
     // a model's reply: Tavern's own turns (rollback, undo, edit, repair) end between their
     // native write and their save write, and reconciling there undoes them.
-    if (!edit && turnRepliedByModel(sessionEvents(session), event.data && event.data.turn)) setTimeout(() => { void reconcileWhenIdle?.(session.id) }, 0)
+    if (!edit && !suppressed && turnRepliedByModel(sessionEvents(session), event.data && event.data.turn)) setTimeout(() => { void reconcileWhenIdle?.(session.id) }, 0)
   })
 
   ctx.on('system-prompt/assemble', async function (_assembly, context, next) {

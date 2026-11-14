@@ -188,7 +188,7 @@ export function planNativeSurfaceRepair({ chat, events = [], nodes = [] }) {
 }
 
 /** Write a plan onto the surface: one replacement over the stale tail, then appends. */
-export function applyNativeSurfaceRepair(session, chat, plan, { repairId }) {
+export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRound = false }) {
   if (plan.status === 'intact') return { applied: false, anchors: [] }
   if (!/^[\w-]{1,100}$/.test(String(repairId || ''))) throw new Error('修复标识无效')
   const mutator = createSessionSurfaceMutator(session, sessionEvents(session))
@@ -204,32 +204,53 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId }) {
   const source = { kind: 'model', provider: 'dsh-tavern', model: 'native-repair' }
   const storySource = turn => Number.isSafeInteger(Number(turn)) && Number(turn) > 0 ? { ...source, tavernStoryTurn: Number(turn) } : source
   const anchors = []
-  // The repair runs between rounds, where no step is open: all its writes share one
-  // edit step. Each reply keeps its story turn in tavernStoryTurn (story alignment
-  // reads it), since its event carries the edit step's numbers.
-  mutator.editStep((turn, step) => {
-    if (session.header?.version >= 3 && session.surface.nodes.length === 0 && plan.rounds.length > 0) {
-      mutator.append('system/message', { turn, step, message: {
-        id: 'tavern-system-head:' + session.id, role: 'system', content: [],
-        source: producerSource('@deepseek-ai/dsh-system-prompt', undefined, 'system'),
-      } }, { surfaceOp: 'append' })
-    }
+  let needSystemHead = session.header?.version >= 3 && session.surface.nodes.length === 0 && plan.rounds.length > 0
+  function writeSystemHead(turn, step) {
+    if (!needSystemHead) return
+    needSystemHead = false
+    mutator.append('system/message', { turn, step, message: {
+      id: 'tavern-system-head:' + session.id, role: 'system', content: [],
+      source: producerSource('@deepseek-ai/dsh-system-prompt', undefined, 'system'),
+    } }, { surfaceOp: 'append' })
+  }
+  function writeRound(index, round, stepTurn, step) {
+    const id = `tavern-native-repair:${repairId}:${index}`
+    const turn = round.turn
+    const input = round.userText === null ? null : write('user/message', { id: id + ':input', role: 'user',
+      content: [{ type: 'text', text: round.userText }], source: { kind: 'user', repair: { id: repairId } } })
+    if (round.standalone) return
+    const reply = write('assistant/message', { turn: stepTurn, step, message: { id: round.greeting ? nativeOpeningMessageId(chat.id) : id + ':reply',
+      role: 'assistant', content: [{ type: 'text', text: round.replyText }], source: storySource(turn) } })
+    // The story turn belongs in the source marker; the anchor and display mapping
+    // locate the actual edit turn that the mutator assigned to this reply.
+    const replyTurn = Number(reply?.data?.turn) || stepTurn
+    anchors.push({ messageIndex: round.messageIndex, anchor: input ? roundAnchor(replyTurn, input, reply) : null, replyTurn })
+  }
+  // 故事分叉初始化空白会话时按轮各自开启独立编辑回合，使轨迹视图按轮次逐轮显示历史。
+  // 已有对局的局部上下文修复仍保持单回合写入，避免推动既有轮号并维持行计划假设。
+  if (perRound && plan.rounds.length > 0) {
     for (const [index, round] of plan.rounds.entries()) {
-      const id = `tavern-native-repair:${repairId}:${index}`
-      const turn = round.turn
-      const input = round.userText === null ? null : write('user/message', { id: id + ':input', role: 'user',
-        content: [{ type: 'text', text: round.userText }], source: { kind: 'user', repair: { id: repairId } } })
-      if (round.standalone) continue
-      const reply = write('assistant/message', { turn, step: 1, message: { id: round.greeting ? nativeOpeningMessageId(chat.id) : id + ':reply',
-        role: 'assistant', content: [{ type: 'text', text: round.replyText }], source: storySource(turn) } })
-      // The story turn belongs in the source marker; the anchor and display mapping
-      // locate the actual edit turn that the mutator assigned to this reply.
-      const replyTurn = Number(reply?.data?.turn) || turn
-      anchors.push({ messageIndex: round.messageIndex, anchor: input ? roundAnchor(replyTurn, input, reply) : null, replyTurn })
+      mutator.editStep((turn, step) => {
+        writeSystemHead(turn, step)
+        writeRound(index, round, turn, step)
+      })
     }
-    // A stale tail with nothing to write in its place: shadow it with an empty node.
-    if (pending) write('assistant/message', { turn: 0, step: 1, message: { id: `tavern-native-repair:${repairId}:empty`, role: 'assistant', content: [], source } })
-  })
+    if (pending) {
+      mutator.editStep((turn, step) => {
+        write('assistant/message', { turn, step, message: { id: `tavern-native-repair:${repairId}:empty`, role: 'assistant', content: [], source } })
+      })
+    }
+  } else {
+    // The repair runs between rounds, where no step is open: all its writes share one
+    // edit step. Each reply keeps its story turn in tavernStoryTurn (story alignment
+    // reads it), since its event carries the edit step's numbers.
+    mutator.editStep((turn, step) => {
+      writeSystemHead(turn, step)
+      for (const [index, round] of plan.rounds.entries()) writeRound(index, round, turn, step)
+      // A stale tail with nothing to write in its place: shadow it with an empty node.
+      if (pending) write('assistant/message', { turn: 0, step: 1, message: { id: `tavern-native-repair:${repairId}:empty`, role: 'assistant', content: [], source } })
+    })
+  }
   return { applied: true, anchors }
 }
 

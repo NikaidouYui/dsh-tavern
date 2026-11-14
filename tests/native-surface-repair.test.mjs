@@ -7,6 +7,7 @@ import { roundAnchor } from '../tavern-plugin/lib/domain/round-anchor.js'
 import { locateRollbackSurface, projectedReplyTurns } from '../tavern-plugin/lib/domain/rollback-surface.js'
 import { nativeOpeningMessageId } from '../tavern-plugin/lib/domain/native-opening.js'
 import { planNativeSurfaceRepair, recordNativeSurfaceRepair, repairNativeSurface } from '../tavern-plugin/lib/domain/native-surface-repair.js'
+import { planTranscriptRows } from '../tavern-plugin/lib/domain/transcript-row-plan.js'
 
 const model = { kind: 'model', provider: 'test', model: 'test' }
 const textOf = event => (event.data.message?.content || event.data.content || []).map(block => block.text).join('')
@@ -311,4 +312,64 @@ test('缺 turn 的旧档行修复后写回新锚点，编辑竞争仍保留旧�
   assert.equal(current.messages[0].nativeAnchor, anchor)
   assert.equal(current.messages[1].nativeAnchor, stale)
   assert.equal(current.nativeSync, undefined)
+})
+
+test('分叉按轮投影到空白会话：每轮独立开启原生回合与步骤，不互相覆盖', () => {
+  const source = game(3)
+  const forkedChat = structuredClone(source.chat)
+  const session = Session.create('seeded-fork-per-round', [], { ...source.session.header, id: 'seeded-fork-per-round', version: 4 })
+  const result = repairNativeSurface(session, forkedChat, { repairId: 'seed-fork-per-round', perRound: true })
+  assert.equal(result.applied, true)
+  recordNativeSurfaceRepair(forkedChat, forkedChat, result.anchors)
+
+  const events = sessionEvents(session)
+  assert.equal(events.find(event => event.seq === session.surface.nodes[0]).type, 'system/message')
+  assert.deepEqual(nodeTexts(session), ['', '开场', '行动2', '正文2', '行动3', '正文3', '行动4', '正文4'])
+
+  // 每轮对应一个独立的 turn/start 与 step/start，且每个 assistant/message 落在各自轮次上。
+  const turnStarts = events.filter(event => event.type === 'turn/start').map(event => event.data.turn)
+  const stepStarts = events.filter(event => event.type === 'step/start').map(event => [event.data.turn, event.data.step])
+  const assistantTurns = events.filter(event => event.type === 'assistant/message').map(event => [event.data.turn, event.data.step, textOf(event)])
+  assert.deepEqual(turnStarts, [1, 2, 3, 4])
+  assert.deepEqual(stepStarts, [[1, 1], [2, 1], [3, 1], [4, 1]])
+  assert.deepEqual(assistantTurns, [[1, 1, '开场'], [2, 1, '正文2'], [3, 1, '正文3'], [4, 1, '正文4']])
+
+  // 幂等、行计划、回退定位、以及后续回合续写均正常。
+  assert.equal(planNativeSurfaceRepair({ chat: forkedChat, events, nodes: session.surface.nodes }).status, 'intact')
+  assert.deepEqual(Object.keys(planTranscriptRows({ chat: forkedChat, events })), [])
+  const lastRow = forkedChat.messages.at(-1)
+  const rollbackTarget = locateRollbackSurface({ events, nodes: session.surface.nodes, anchor: lastRow.nativeAnchor })
+  assert.equal(rollbackTarget.turn, 4)
+  assert.equal(textOf(events.find(event => event.seq === rollbackTarget.assistantSeq)), '正文4')
+
+  appendSessionEvent(session, 'turn/start', { turn: 5 })
+  appendSessionEvent(session, 'step/start', { turn: 5, step: 1 })
+  appendSessionEvent(session, 'system/message', { turn: 5, step: 1, message: {
+    id: 'updated-system', role: 'system', content: [{ type: 'text', text: '提示词' }], source: { kind: 'system-prompt' }
+  } }, { surfaceOp: 'append' })
+  assert.doesNotThrow(() => Session.fromRestore(session.id, sessionEvents(session), session.header, 0, 'detached'))
+})
+
+test('分叉按轮投影含独立输入或跳号轮次时，映射与幂等均保持一致', () => {
+  const base = Session.create('seeded-fork-gaps-base')
+  const session = Session.create('seeded-fork-gaps', [], { ...base.header, id: 'seeded-fork-gaps', version: 4 })
+  const chat = {
+    id: 'chat-gaps', mode: 'story',
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场' },
+      { role: 'user', text: '悬空输入' },
+      { role: 'user', text: '行动5' },
+      { role: 'assistant', turn: 5, text: '正文5' }
+    ]
+  }
+  const result = repairNativeSurface(session, chat, { repairId: 'seed-gaps', perRound: true })
+  assert.equal(result.applied, true)
+  recordNativeSurfaceRepair(chat, chat, result.anchors)
+
+  const events = sessionEvents(session)
+  assert.deepEqual(events.filter(event => event.type === 'turn/start').map(event => event.data.turn), [1, 2, 3])
+  assert.deepEqual(nodeTexts(session), ['', '开场', '悬空输入', '行动5', '正文5'])
+  assert.equal(chat.regeneratedDshTurns[5], 3)
+  assert.equal(chat.messages.at(-1).nativeAnchor.turn, 3)
+  assert.equal(planNativeSurfaceRepair({ chat, events, nodes: session.surface.nodes }).status, 'intact')
 })

@@ -220,8 +220,10 @@ export function registerTurnLifecycleHooks({
     if (!edit) setTimeout(() => {
       synchronizeTemplateHistoryWhenIdle(session).catch(error => console.warn('dsh-tavern: 模板改写同步失败', session.id, error?.message || error))
     }, 0)
-    const reply = assistantResultForTurn(session, event.data && event.data.turn)
-    void autoChoices.completed({ sessionId: session.id, turn: event.data && event.data.turn, messageId: String(reply?.event?.data?.message?.id || ''), reason })
+    if (!edit) {
+      const reply = assistantResultForTurn(session, event.data && event.data.turn)
+      void autoChoices.completed({ sessionId: session.id, turn: event.data && event.data.turn, messageId: String(reply?.event?.data?.message?.id || ''), reason })
+    }
     // A turn whose record went missing (#196) is adopted before the player's next
     // message, once the agent has gone idle; reconcile never blocks this hook. Only after
     // a model's reply: Tavern's own turns (rollback, undo, edit, repair) end between their

@@ -1,0 +1,391 @@
+name: Sync upstream and release
+
+on:
+  schedule:
+    # 每 6 小时自动检查并同步上游更新
+    - cron: '0 */6 * * *'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sync-upstream-and-release.yml'
+      - '.github/scripts/sync-upstream.mjs'
+      - '.github/scripts/rewrite-fork-repository.mjs'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 即使上游没有新提交，也强制重新打包并发布插件与运行归档
+        type: boolean
+        default: false
+      upstream_repo:
+        description: 上游仓库（owner/repo）
+        type: string
+        default: flizzywine/dsh-tavern
+      upstream_branch:
+        description: 上游分支
+        type: string
+        default: main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-${{ github.event.repository.default_branch }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.plan.outputs.should_release }}
+      merged: ${{ steps.sync.outputs.merged }}
+      committed: ${{ steps.sync.outputs.committed }}
+      head_sha: ${{ steps.sync.outputs.head_sha }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+      upstream_commits: ${{ steps.sync.outputs.upstream_commits }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Sync upstream and rewrite repository references
+        id: sync
+        shell: bash
+        env:
+          UPSTREAM_REPO: ${{ inputs.upstream_repo || 'flizzywine/dsh-tavern' }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch || 'main' }}
+          GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/sync-upstream.mjs
+
+      - name: Determine whether release packaging is needed
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMITTED: ${{ steps.sync.outputs.committed }}
+          FORCE_RELEASE: ${{ inputs.force_release || 'false' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          should_release=false
+          reasons=()
+
+          if [[ "$FORCE_RELEASE" == "true" ]]; then
+            should_release=true
+            reasons+=("手动强制打包")
+          fi
+          if [[ "$COMMITTED" == "true" ]]; then
+            should_release=true
+            reasons+=("已同步上游更新或更新仓库指向")
+          fi
+          if ! gh release view launcher-current >/dev/null 2>&1; then
+            should_release=true
+            reasons+=("缺少 launcher-current Release")
+          fi
+          if ! git ls-remote --exit-code --heads origin "runtime-archive-${DEFAULT_BRANCH}" >/dev/null 2>&1; then
+            should_release=true
+            reasons+=("缺少 runtime-archive-${DEFAULT_BRANCH} 分支")
+          fi
+          if ! git ls-remote --exit-code --heads origin launcher-cdn-current >/dev/null 2>&1; then
+            should_release=true
+            reasons+=("缺少 launcher-cdn-current 分支")
+          fi
+
+          printf 'should_release=%s\n' "$should_release" >> "$GITHUB_OUTPUT"
+          if [[ "$should_release" == "true" ]]; then
+            echo "触发发布打包，原因：${reasons[*]}"
+          else
+            echo "上游无新提交且所有发布产物已存在，跳过本次打包。"
+          fi
+
+  publish-runtime:
+    needs: sync
+    if: needs.sync.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-runtime-manifest-${{ github.event.repository.default_branch }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Build immutable runtime manifest
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$TARGET_BRANCH"
+          git checkout "$TARGET_BRANCH"
+          git pull --ff-only origin "$TARGET_BRANCH"
+          prev_seq=$(node -e "try{console.log(Number(require('./dsh-tavern-runtime.json').releaseSequence)||0)}catch{console.log(0)}")
+          next_seq=$(( prev_seq + 1 ))
+          if (( GITHUB_RUN_NUMBER > next_seq )); then
+            next_seq=$GITHUB_RUN_NUMBER
+          fi
+          node .github/scripts/write-runtime-manifest.mjs "$(git rev-parse HEAD)" "$next_seq"
+
+      - name: Publish runtime archive
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          archive="$RUNNER_TEMP/runtime.zip"
+          rm -f "$archive"
+          node -e "for (const file of require('./dsh-tavern-runtime.json').files) console.log(file.path)" | zip -X -9 -q -D "$archive" -@
+          node .github/scripts/check-runtime-archive.mjs "$archive"
+          dist="runtime-archive-${TARGET_BRANCH}"
+          git worktree add --detach "$RUNNER_TEMP/dist"
+          (
+            cd "$RUNNER_TEMP/dist"
+            git checkout -q --orphan "$dist"
+            git rm -rfq .
+            cp "$archive" runtime.zip
+            git add runtime.zip
+            git commit -qm "runtime archive for $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+            git rev-parse HEAD > "$RUNNER_TEMP/archive-commit"
+          )
+          node .github/scripts/attach-runtime-archive.mjs "$(cat "$RUNNER_TEMP/archive-commit")" "$archive"
+          node .github/scripts/stage-cdn-entrypoints.mjs "$RUNNER_TEMP/dist"
+          (
+            cd "$RUNNER_TEMP/dist"
+            git add install.ps1 install.sh android/setup.sh dsh-tavern-runtime.json
+            git commit -qm "CDN entry points for $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+            git push -q --force origin "HEAD:refs/heads/$dist"
+          )
+          git worktree remove --force "$RUNNER_TEMP/dist"
+          ls -l "$archive"
+
+      - name: Commit manifest
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git add dsh-tavern-runtime.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "chore: publish runtime manifest [skip ci]"
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+      - name: Refresh and check jsDelivr caches
+        shell: bash
+        env:
+          GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
+        run: |
+          node .github/scripts/refresh-cdn.mjs --best-effort
+
+  publish-launcher:
+    needs: [sync, publish-runtime]
+    if: always() && needs.sync.outputs.should_release == 'true' && (needs.publish-runtime.result == 'success' || needs.publish-runtime.result == 'skipped')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-official-launcher
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Pack DSH launcher plugin
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=tavern-plugin/packages/dsh-tavern
+          version=$(node -p "require('./$source/package.json').version")
+          app_version=$(node -p "require('./package.json').version")
+          archive="dsh-tavern-${version}.tgz"
+          artifact="$RUNNER_TEMP/$archive"
+          npm pack "./$source" --ignore-scripts --silent --pack-destination "$RUNNER_TEMP"
+          node .github/scripts/check-runtime-archive.mjs "$artifact"
+          printf 'artifact=%s\narchive=%s\nversion=%s\napp_version=%s\n' \
+            "$artifact" "$archive" "$version" "$app_version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Releases (launcher-current & versioned)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LAUNCHER_ARTIFACT: ${{ steps.pack.outputs.artifact }}
+          LAUNCHER_ARCHIVE: ${{ steps.pack.outputs.archive }}
+          LAUNCHER_VERSION: ${{ steps.pack.outputs.version }}
+          APP_VERSION: ${{ steps.pack.outputs.app_version }}
+          UPSTREAM_COMMITS: ${{ needs.sync.outputs.upstream_commits }}
+          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse HEAD)
+          digest="sha256:$(sha256sum "$LAUNCHER_ARTIFACT" | cut -d' ' -f1)"
+          label="dsh-tavern ${LAUNCHER_VERSION}"
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes_file" <<EOF
+          DSH Tavern 插件包与酒馆运行环境已同步构建。
+
+          ### 在 DSH 中安装 / 升级插件
+          在 DSH 的 **插件 → 添加插件** 中粘贴下方任一地址即可安装或更新：
+          - **GitHub Release 直链**：\`https://github.com/${GITHUB_REPOSITORY}/releases/download/launcher-current/dsh-tavern.tgz\`
+          - **jsDelivr CDN 地址**：\`https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@launcher-cdn-current/dsh-tavern.tgz\`
+
+          ### 版本信息
+          - 酒馆版本：\`${APP_VERSION}\`
+          - 启动器版本：\`${LAUNCHER_VERSION}\`
+          - 当前提交：\`${head_sha}\`
+          - 上游提交：\`${UPSTREAM_SHA}\`
+          EOF
+
+          if [[ -n "$UPSTREAM_COMMITS" ]]; then
+            {
+              echo ""
+              echo "### 本次同步的上游提交"
+              echo '```text'
+              echo "$UPSTREAM_COMMITS"
+              echo '```'
+            } >> "$notes_file"
+          fi
+
+          replace_release_asset() {
+            local tag="$1"
+            local asset="$2"
+            local src="$3"
+            local asset_label="$4"
+            local release_id
+            release_id=$(gh release view "$tag" --json databaseId --jq .databaseId)
+            local release_assets="repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets"
+            local asset_api="repos/${GITHUB_REPOSITORY}/releases/assets"
+            local assets
+            assets=$(gh api "$release_assets" --paginate --slurp | jq 'add')
+
+            if jq -e --arg name "$asset" --arg digest "$digest" \
+              'any(.[]; .name == $name and .digest == $digest and .state == "uploaded")' <<< "$assets" >/dev/null; then
+              echo "$tag 的资产 $asset 内容未变化，跳过上传。"
+              return 0
+            fi
+
+            local candidate="candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${asset}"
+            cp "$src" "$RUNNER_TEMP/$candidate"
+            gh release upload "$tag" "$RUNNER_TEMP/$candidate#$asset_label"
+            local candidate_id previous_id
+            candidate_id=$(gh api "$release_assets" --paginate --slurp | jq -er --arg name "$candidate" --arg digest "$digest" \
+              'add | .[] | select(.name == $name and .digest == $digest and .state == "uploaded") | .id')
+            previous_id=$(jq -r --arg name "$asset" '.[] | select(.name == $name) | .id' <<< "$assets")
+            if [[ -n "$previous_id" ]]; then
+              gh api --method PATCH "$asset_api/$previous_id" -f name="previous-${previous_id}-${asset}" --silent
+            fi
+            if ! gh api --method PATCH "$asset_api/$candidate_id" -f name="$asset" --silent \
+              || [[ $(gh api "$asset_api/$candidate_id" --jq .name) != "$asset" ]]; then
+              if [[ -n "$previous_id" ]]; then
+                gh api --method PATCH "$asset_api/$previous_id" -f name="$asset" --silent || true
+              fi
+              return 1
+            fi
+            if [[ -n "$previous_id" ]]; then
+              gh api --method DELETE "$asset_api/$previous_id" --silent
+            fi
+          }
+
+          # 1. 更新固定入口 Release: launcher-current (dsh-tavern.tgz)
+          if ! gh release view launcher-current >/dev/null 2>&1; then
+            cp "$LAUNCHER_ARTIFACT" "$RUNNER_TEMP/dsh-tavern.tgz"
+            gh release create launcher-current "$RUNNER_TEMP/dsh-tavern.tgz#$label" \
+              --target "$head_sha" --latest=false \
+              --title "DSH Tavern Launcher (Current)" \
+              --notes-file "$notes_file"
+          else
+            git tag -f launcher-current "$head_sha"
+            git push -f origin refs/tags/launcher-current
+            gh release edit launcher-current --notes-file "$notes_file"
+            replace_release_asset launcher-current dsh-tavern.tgz "$LAUNCHER_ARTIFACT" "$label"
+          fi
+
+          # 2. 维护版本化 Release: launcher-v<version>
+          vtag="launcher-v${LAUNCHER_VERSION}"
+          if ! gh release view "$vtag" >/dev/null 2>&1; then
+            gh release create "$vtag" "${LAUNCHER_ARTIFACT}#${label}" \
+              --target "$head_sha" --latest=false \
+              --title "dsh-tavern ${LAUNCHER_VERSION}" \
+              --notes-file "$notes_file"
+          else
+            gh release edit "$vtag" --notes-file "$notes_file"
+            replace_release_asset "$vtag" "$LAUNCHER_ARCHIVE" "$LAUNCHER_ARTIFACT" "$label"
+          fi
+
+      - name: Publish launcher CDN branch & tag
+        shell: bash
+        env:
+          LAUNCHER_ARTIFACT: ${{ steps.pack.outputs.artifact }}
+          LAUNCHER_ARCHIVE: ${{ steps.pack.outputs.archive }}
+          LAUNCHER_VERSION: ${{ steps.pack.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # 固定 CDN 分支：launcher-cdn-current (dsh-tavern.tgz)
+          cdn_work="$RUNNER_TEMP/launcher-cdn-current"
+          git worktree add --detach "$cdn_work"
+          (
+            cd "$cdn_work"
+            git checkout -q --orphan launcher-cdn-current
+            git rm -rfq .
+            cp "$LAUNCHER_ARTIFACT" dsh-tavern.tgz
+            git add dsh-tavern.tgz
+            git commit -qm "Publish dsh-tavern.tgz ($LAUNCHER_VERSION)"
+            git push -q --force origin HEAD:refs/heads/launcher-cdn-current
+          )
+          git worktree remove --force "$cdn_work"
+
+          # 版本化 CDN tag：launcher-cdn-v<version>（不存在时推送）
+          cdn_tag="launcher-cdn-v${LAUNCHER_VERSION}"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${cdn_tag}" >/dev/null 2>&1; then
+            tag_work="$RUNNER_TEMP/launcher-cdn-tag"
+            git worktree add --detach "$tag_work"
+            (
+              cd "$tag_work"
+              git checkout -q --orphan "$cdn_tag"
+              git rm -rfq .
+              cp "$LAUNCHER_ARTIFACT" "$LAUNCHER_ARCHIVE"
+              git add "$LAUNCHER_ARCHIVE"
+              git commit -qm "Publish $LAUNCHER_ARCHIVE"
+              git push -q origin "HEAD:refs/tags/${cdn_tag}"
+            )
+            git worktree remove --force "$tag_work"
+          fi
+
+          # 刷新 jsDelivr 缓存（best-effort）
+          curl -fsSL "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@launcher-cdn-current/dsh-tavern.tgz" >/dev/null || true
+
+      - name: Write workflow summary
+        shell: bash
+        env:
+          LAUNCHER_VERSION: ${{ steps.pack.outputs.version }}
+          APP_VERSION: ${{ steps.pack.outputs.app_version }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## 同步与打包完成
+
+          - **酒馆版本**：\`${APP_VERSION}\`
+          - **启动器插件版本**：\`${LAUNCHER_VERSION}\`
+
+          ### DSH 插件安装 / 升级地址（任选其一粘贴到「插件 → 添加插件」）
+          - GitHub Release：\`https://github.com/${GITHUB_REPOSITORY}/releases/download/launcher-current/dsh-tavern.tgz\`
+          - jsDelivr CDN：\`https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@launcher-cdn-current/dsh-tavern.tgz\`
+          EOF

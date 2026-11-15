@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "revision": "ab164b622557817423673972a59dcf77134331f6",
-  "releaseSequence": 7,
+  "revision": "8ace70900395cc36cd83b1969836eb25a484760f",
+  "releaseSequence": 8,
   "version": "3.3.0",
   "files": [
     {
@@ -290,6 +290,11 @@
       "size": 1936
     },
     {
+      "path": "bin/llm-stream-timeout-patch.mjs",
+      "sha256": "eb5f305e889e1122e14512c7dc292d113f410625818bb8fd2539f25ce5ae5d95",
+      "size": 1304
+    },
+    {
       "path": "bin/migrate-conversation-storage.mjs",
       "sha256": "1c8babe3833d1f5f03c8c2808691845eeeddaf433b216a184419425d5d1a063a",
       "size": 1645
@@ -356,8 +361,8 @@
     },
     {
       "path": "bin/profile-installation.mjs",
-      "sha256": "8a8452eae16f34cc63600413900035ce05b2f8a138bff0b0a18555154d8ae76d",
-      "size": 34324
+      "sha256": "915bb786f361d1ef7f4de9b7c9e9f7cf556963b4e70009f75f9146cd9e5a20a7",
+      "size": 35225
     },
     {
       "path": "bin/prune-installed-files.mjs",
@@ -391,8 +396,8 @@
     },
     {
       "path": "bin/service-lifecycle.mjs",
-      "sha256": "0ecd3b4c9909741c78906c3984f860d3fe6502c606630729a7ada261228e5225",
-      "size": 27548
+      "sha256": "7ba43c74ef50f78b2c3ab6985a7a5165858b84fcf4bb11067e4a2b46cc2cb3dc",
+      "size": 28363
     },
     {
       "path": "bin/service-process-identity.mjs",
@@ -1066,7 +1071,7 @@
     },
     {
       "path": "tavern-plugin/lib/client.js",
-      "sha256": "214dddf7eaf5ed9ced9d27077b423f8c16d004a3a221b5c24868f3119b17453a",
+      "sha256": "8a0865df5599041c21e43ee95f01b7771727cc667b801e4646c6764b127bb021",
       "size": 6427138
     },
     {
@@ -1231,7 +1236,7 @@
     },
     {
       "path": "tavern-plugin/lib/domain/background-progress.js",
-      "sha256": "2af666edfb41289c42267099ed00ca6b2da64743256ac6eee790204af37ed752",
+      "sha256": "937cffd1adb41ee32e2060f0488e71711bebbde1c23b5c550058a34a81d6b0eb",
       "size": 2128
     },
     {
@@ -2090,6 +2095,11 @@
       "size": 21238
     },
     {
+      "path": "tavern-plugin/lib/domain/host-stream-timeout-patch.js",
+      "sha256": "ef8dc897e0b537a68d7c9f39ced175780655106f1df03181837394dd5a64b2c8",
+      "size": 4311
+    },
+    {
       "path": "tavern-plugin/lib/domain/host-subprocess-patch.js",
       "sha256": "d4faafda0435e901c6b544dff4b4dc3be853b08e687a73a8945377ac6eb272d3",
       "size": 3446
@@ -2258,6 +2268,11 @@
       "path": "tavern-plugin/lib/domain/live-card-update.js",
       "sha256": "c04077774b4a9d357b479715f7ba35e09585ae6bf149f47f42c288202e708955",
       "size": 18220
+    },
+    {
+      "path": "tavern-plugin/lib/domain/llm-stream-timeout.js",
+      "sha256": "05742cfce2bfc61a5590bb2b05c6c8e63fb8efc422b06e3f26de06d57df4af4b",
+      "size": 2263
     },
     {
       "path": "tavern-plugin/lib/domain/manual-character-design.js",
@@ -4121,8 +4136,8 @@
     },
     {
       "path": "tavern-plugin/lib/index.js",
-      "sha256": "d1722f4dc60bdbd198c20b85ebb1dcf995192ac78688f69ee0060f2896d914a2",
-      "size": 314351
+      "sha256": "91d9c0625a6d8292da9ae208fa2e1b19e490314b03feb29c967b8a2bb25b16ef",
+      "size": 314689
     },
     {
       "path": "tavern-plugin/lib/metadata-backup.js",
@@ -9271,9 +9286,9 @@
     }
   ],
   "archive": {
-    "commit": "20781a7cceb3e300d0eac7eeceddac8e41739ed6",
+    "commit": "45549780746ac791b824daa5b9eab1ac6084f7f1",
     "path": "runtime.zip",
-    "sha256": "77bde4101ab968141994e06ffbc14e3f06e1d4b13ed302951a5918dec0f208ed",
-    "size": 16589154
+    "sha256": "611c48cbde580679d74fa62e3b0ff8e6c1d9812116b70041129854aad9c6bdc0",
+    "size": 16593134
   }
 }

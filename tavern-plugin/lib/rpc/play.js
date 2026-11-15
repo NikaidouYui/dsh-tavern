@@ -187,6 +187,26 @@ export function createPlayHandlers(deps) {
       })
       return { plotCompass }
     },
+    async setPlotCompassPreferences(args) {
+      const plotCompass = await plotCompassService.setPreferences({
+        sessionId: args?.sessionId,
+        pace: args?.pace,
+        blindBox: args?.blindBox,
+        customDirective: args?.customDirective
+      })
+      return { plotCompass }
+    },
+    async chatPlotCompass(args) {
+      return await plotCompassService.chat({
+        sessionId: args?.sessionId,
+        message: args?.message,
+        wait: args?.wait === true
+      })
+    },
+    async clearPlotCompassChat(args) {
+      const plotCompass = await plotCompassService.clearChat({ sessionId: args?.sessionId })
+      return { plotCompass }
+    },
     async setPlotCompassEnabled(args) {
       return await plotCompassService.setEnabled({
         sessionId: args?.sessionId,

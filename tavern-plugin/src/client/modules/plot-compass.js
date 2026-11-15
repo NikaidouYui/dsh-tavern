@@ -25,6 +25,20 @@ const PLOT_COMPASS_HORIZON_META = Object.freeze([
     }
 ]);
 
+const PLOT_COMPASS_PACE_OPTIONS = Object.freeze([
+    { key: "foreshadow", label: "只铺垫", title: "侧重氛围感官、暗流铺垫与可逆试探，本轮暂不急着引爆拐点" },
+    { key: "natural", label: "自然推进", title: "顺应角色性格与现场因果自然向前推进（默认）" },
+    { key: "climax", label: "尽快引爆", title: "提高戏剧张力，推动当前节拍或篇章冲突正面对撞" }
+]);
+
+function compassMidPhaseLabel(index, total) {
+    if (total <= 1) return "";
+    if (index === total - 1) return "高潮";
+    if (total >= 3 && index === total - 2) return "抉择";
+    if (index === 0) return "入线";
+    return "升级";
+}
+
 function activeCompassSummaryOf(compass) {
     if (!compass || typeof compass !== "object") return { shortTerm: null, midTerm: null, longTerm: null, any: null, count: 0 };
     const pinned = compass.pinned || {};
@@ -103,26 +117,48 @@ function TavernPlotCompassTab(props) {
     const [editingArchetypes, setEditingArchetypes] = React.useState(false);
     const [archetypeDraft, setArchetypeDraft] = React.useState("");
     const [selectedArchetypes, setSelectedArchetypes] = React.useState([]);
+    const [editingDirective, setEditingDirective] = React.useState(false);
+    const [directiveDraft, setDirectiveDraft] = React.useState("");
+    const [peekedCards, setPeekedCards] = React.useState({});
+    const [chatOpen, setChatOpen] = React.useState(false);
     const [busyAction, setBusyAction] = React.useState("");
     const [localError, setLocalError] = React.useState("");
     const [localNotice, setLocalNotice] = React.useState("");
 
     const compass = (view && view.plotCompass) || {
+        pace: "natural", blindBox: false, customDirective: "",
         playArchetypes: [], customArchetypes: [], situationDigest: "",
         shortTerm: [], midTerm: [], longTerm: [],
-        pinned: { shortTerm: null, midTerm: null, longTerm: null }, archived: [], basedOnTurn: 0
+        pinned: { shortTerm: null, midTerm: null, longTerm: null }, archived: [], chatHistory: [], basedOnTurn: 0
     };
     const compassEnabled = Boolean(view && view.plotCompassEnabled === true);
     const task = (view && view.plotCompassTask) || { status: "idle", scope: "all", error: "" };
     const isRunning = task.status === "running";
     const active = activeCompassSummaryOf(compass);
     const hasAnyRoutes = compass.shortTerm.length > 0 || compass.midTerm.length > 0 || compass.longTerm.length > 0;
+    const currentPace = compass.pace || "natural";
+    const blindBox = compass.blindBox === true;
+    const customDirective = String(compass.customDirective || "");
+    const chatHistory = Array.isArray(compass.chatHistory) ? compass.chatHistory : [];
 
     React.useEffect(function () {
         setLocalError("");
         setLocalNotice("");
         setEditingArchetypes(false);
+        setEditingDirective(false);
+        setPeekedCards({});
+        setChatOpen(false);
     }, [sessionId]);
+
+    React.useEffect(function () {
+        if (chatHistory.length > 0 && task.scope === "chat") {
+            setChatOpen(true);
+        }
+    }, [chatHistory.length, task.scope]);
+
+    React.useEffect(function () {
+        setDirectiveDraft(customDirective);
+    }, [customDirective, sessionId]);
 
     async function toggleEnabled(nextEnabled) {
         if (!sessionId || busyAction) return;
@@ -154,6 +190,47 @@ function TavernPlotCompassTab(props) {
         } finally {
             setBusyAction("");
         }
+    }
+
+    async function sendCompassChat(overrideText) {
+        const text = String(overrideText !== undefined ? overrideText : guidance).trim();
+        if (!text || !sessionId || isRunning || busyAction) return;
+        setBusyAction("chat");
+        setLocalError("");
+        setLocalNotice("");
+        setChatOpen(true);
+        if (overrideText === undefined) setGuidance("");
+        try {
+            await rpc("chatPlotCompass", { message: text }, sessionId);
+            liveTavernView.invalidate(sessionId);
+        } catch (err) {
+            setLocalError(String(err && err.message || err));
+        } finally {
+            setBusyAction("");
+        }
+    }
+
+    async function clearCompassChatHistory() {
+        if (!sessionId || isRunning || busyAction) return;
+        setBusyAction("clearChat");
+        setLocalError("");
+        try {
+            await rpc("clearPlotCompassChat", {}, sessionId);
+            setChatOpen(false);
+            liveTavernView.invalidate(sessionId);
+            setLocalNotice("已清空脑暴对话记录。");
+        } catch (err) {
+            setLocalError(String(err && err.message || err));
+        } finally {
+            setBusyAction("");
+        }
+    }
+
+    async function applyBrainstormIdea(scope, ideaText) {
+        const target = scope === "shortTerm" ? "shortTerm" : "all";
+        const promptText = "请严格围绕我们刚才在罗盘对话里讨论通过的以下思路，直接生成并更新正式的多分支路线规划：\n" + String(ideaText || "").slice(0, 680);
+        if (target === "shortTerm") setActiveHorizon("shortTerm");
+        await runGenerate(target, promptText);
     }
 
     async function cancelGenerate() {
@@ -300,6 +377,30 @@ function TavernPlotCompassTab(props) {
         }
     }
 
+    async function savePreferences(patch, noticeText) {
+        if (!sessionId || busyAction) return;
+        setBusyAction("preferences");
+        setLocalError("");
+        try {
+            await rpc("setPlotCompassPreferences", patch, sessionId);
+            liveTavernView.invalidate(sessionId);
+            if (noticeText) setLocalNotice(noticeText);
+        } catch (err) {
+            setLocalError(String(err && err.message || err));
+        } finally {
+            setBusyAction("");
+        }
+    }
+
+    function toggleCardPeek(horizon, routeId) {
+        const key = horizon + ":" + routeId;
+        setPeekedCards(function (prev) {
+            const next = Object.assign({}, prev);
+            next[key] = !prev[key];
+            return next;
+        });
+    }
+
     if (!sessionId || !view) {
         return h("aside", { className: "dsh-tavern-status dsh-tavern-compass-panel" },
             h("div", { className: "dsh-tavern-status-head" }, h("div", { className: "dsh-tavern-status-title" }, "剧情罗盘")),
@@ -331,10 +432,13 @@ function TavernPlotCompassTab(props) {
         const isPinned = currentPinnedId === route.id;
         const steps = horizon === "shortTerm" ? (route.beats || []) : horizon === "midTerm" ? (route.milestones || []) : [];
         const doneCount = steps.filter(function (s) { return s && s.done; }).length;
+        const peekKey = horizon + ":" + route.id;
+        const isPeeked = Boolean(peekedCards[peekKey]);
+        const isMasked = blindBox && !isPeeked;
 
         return h("article", {
             key: route.id,
-            className: "dsh-tavern-compass-card" + (isPinned ? " is-pinned" : ""),
+            className: "dsh-tavern-compass-card" + (isPinned ? " is-pinned" : "") + (isMasked ? " is-blindbox" : ""),
             "data-horizon": horizon
         },
             h("header", { className: "dsh-tavern-compass-card-head" },
@@ -348,45 +452,76 @@ function TavernPlotCompassTab(props) {
                     isPinned ? h("span", { className: "dsh-tavern-compass-pill is-active" }, "★ 已锚定") : null
                 )
             ),
-            h("p", { className: "dsh-tavern-compass-card-summary" }, horizon === "longTerm" ? route.vision : route.summary),
-            horizon === "midTerm" && route.entryHook ? h("div", { className: "dsh-tavern-compass-callout" },
-                h("strong", null, "入线契机："),
-                h("span", null, route.entryHook)
-            ) : null,
-            steps.length > 0 ? h("div", { className: "dsh-tavern-compass-steps" },
-                h("div", { className: "dsh-tavern-compass-steps-head" },
-                    h("span", null, (horizon === "shortTerm" ? "推进节拍" : "篇章里程碑") + " · 随新回合自动打勾（也可手动点选）"),
-                    h("span", null, doneCount + "/" + steps.length)
-                ),
-                h("ul", { className: "dsh-tavern-compass-step-list" }, steps.map(function (step, idx) {
-                    const checked = Boolean(step && step.done);
-                    return h("li", { key: idx, className: checked ? "is-done" : "" },
+            isMasked
+                ? h("div", { className: "dsh-tavern-compass-blindbox-mask" },
+                    h("p", { className: "dsh-tavern-compass-blindbox-hint" },
+                        route.diegeticOmen
+                            ? "🎁 盲盒防剧透已开启（已隐藏走向与节点）：" + route.diegeticOmen
+                            : "🎁 盲盒防剧透已开启：详细节拍、因果依据与终局剧透已遮罩，仅保留方向基调，放心在正文中探索未知。"
+                    ),
+                    steps.length > 0 ? h("p", { className: "dsh-tavern-compass-meta-line is-subtle" }, "当前进度：" + doneCount + "/" + steps.length + " 阶段已完成") : null,
+                    h("button", {
+                        type: "button",
+                        className: "dsh-tavern-compass-link-btn",
+                        onClick: function () { toggleCardPeek(horizon, route.id); }
+                    }, "👀 临时查看此卡剧透")
+                )
+                : h(React.Fragment, null,
+                    blindBox ? h("div", { className: "dsh-tavern-compass-peek-bar" },
                         h("button", {
                             type: "button",
-                            className: "dsh-tavern-compass-step-btn",
-                            disabled: Boolean(busyAction),
-                            "aria-pressed": checked ? "true" : "false",
-                            title: checked ? "标记为未完成" : "标记为已达成",
-                            onClick: function () { toggleStep(horizon, route.id, idx); }
-                        },
-                            h("span", { className: "dsh-tavern-compass-check", "aria-hidden": true }, checked ? "✓" : "○"),
-                            h("span", { className: "dsh-tavern-compass-step-text" }, step.text)
-                        )
-                    );
-                }))
-            ) : null,
-            horizon === "midTerm" && route.stakes ? h("p", { className: "dsh-tavern-compass-meta-line" },
-                h("strong", null, "收益与风险："), route.stakes
-            ) : null,
-            horizon === "longTerm" && Array.isArray(route.prerequisites) && route.prerequisites.length > 0 ? h("div", { className: "dsh-tavern-compass-steps" },
-                h("div", { className: "dsh-tavern-compass-steps-head" }, h("span", null, "达成前置拐点")),
-                h("ul", { className: "dsh-tavern-compass-prereq-list" }, route.prerequisites.map(function (req, idx) {
-                    return h("li", { key: idx }, req);
-                }))
-            ) : null,
-            horizon === "longTerm" && route.toneGuidance ? h("p", { className: "dsh-tavern-compass-meta-line is-subtle", title: "点亮此终局后，前台正文只会收到这句暗流基调，不会剧透或抢跑结局" },
-                h("strong", null, "防剧透暗流指引："), route.toneGuidance
-            ) : null,
+                            className: "dsh-tavern-compass-link-btn",
+                            onClick: function () { toggleCardPeek(horizon, route.id); }
+                        }, "🙈 收起剧透（恢复盲盒遮罩）")
+                    ) : null,
+                    h("p", { className: "dsh-tavern-compass-card-summary" }, horizon === "longTerm" ? route.vision : route.summary),
+                    route.causalBasis && horizon !== "longTerm" ? h("p", { className: "dsh-tavern-compass-meta-line is-causal" },
+                        h("strong", null, "因果依据："), route.causalBasis
+                    ) : null,
+                    horizon === "midTerm" && route.entryHook ? h("div", { className: "dsh-tavern-compass-callout" },
+                        h("strong", null, "入线契机："),
+                        h("span", null, route.entryHook)
+                    ) : null,
+                    steps.length > 0 ? h("div", { className: "dsh-tavern-compass-steps" },
+                        h("div", { className: "dsh-tavern-compass-steps-head" },
+                            h("span", null, (horizon === "shortTerm" ? "推进节拍" : "篇章里程碑") + " · 随新回合自动打勾（也可手动点选）"),
+                            h("span", null, doneCount + "/" + steps.length)
+                        ),
+                        h("ul", { className: "dsh-tavern-compass-step-list" }, steps.map(function (step, idx) {
+                            const checked = Boolean(step && step.done);
+                            const roleLabel = horizon === "midTerm" ? compassMidPhaseLabel(idx, steps.length) : "";
+                            return h("li", { key: idx, className: checked ? "is-done" : "" },
+                                h("button", {
+                                    type: "button",
+                                    className: "dsh-tavern-compass-step-btn",
+                                    disabled: Boolean(busyAction),
+                                    "aria-pressed": checked ? "true" : "false",
+                                    title: checked ? "标记为未完成" : "标记为已达成",
+                                    onClick: function () { toggleStep(horizon, route.id, idx); }
+                                },
+                                    h("span", { className: "dsh-tavern-compass-check", "aria-hidden": true }, checked ? "✓" : "○"),
+                                    roleLabel ? h("span", { className: "dsh-tavern-compass-phase-tag" }, roleLabel) : null,
+                                    h("span", { className: "dsh-tavern-compass-step-text" }, step.text)
+                                )
+                            );
+                        }))
+                    ) : null,
+                    horizon === "midTerm" && route.stakes ? h("p", { className: "dsh-tavern-compass-meta-line" },
+                        h("strong", null, "收益与风险："), route.stakes
+                    ) : null,
+                    horizon === "longTerm" && Array.isArray(route.prerequisites) && route.prerequisites.length > 0 ? h("div", { className: "dsh-tavern-compass-steps" },
+                        h("div", { className: "dsh-tavern-compass-steps-head" }, h("span", null, "达成前置拐点")),
+                        h("ul", { className: "dsh-tavern-compass-prereq-list" }, route.prerequisites.map(function (req, idx) {
+                            return h("li", { key: idx }, req);
+                        }))
+                    ) : null,
+                    horizon === "longTerm" && route.toneGuidance ? h("p", { className: "dsh-tavern-compass-meta-line is-subtle", title: "点亮此终局后，前台正文只会收到这句暗流基调，不会剧透或抢跑结局" },
+                        h("strong", null, "防剧透暗流指引："), route.toneGuidance
+                    ) : null,
+                    route.diegeticOmen && horizon !== "shortTerm" ? h("p", { className: "dsh-tavern-compass-meta-line is-subtle", title: "点亮此路线时，正文可通过传闻/异象自然透出此风声（不剧透）" },
+                        h("strong", null, "世界内预兆："), route.diegeticOmen
+                    ) : null
+                ),
             h("footer", { className: "dsh-tavern-compass-card-actions" },
                 h("button", {
                     type: "button",
@@ -501,45 +636,198 @@ function TavernPlotCompassTab(props) {
                     )
                 ) : null,
                 compass.situationDigest ? h("p", { className: "dsh-tavern-compass-digest" }, compass.situationDigest) : null,
-                h("div", { className: "dsh-tavern-compass-guidance-box" },
-                    h("input", {
-                        type: "text",
-                        className: "dsh-tavern-compass-input",
-                        maxLength: 400,
-                        disabled: isRunning,
-                        placeholder: "脑暴灵感方向（可选，如：给几条和宿敌暗中联手搞事的路线）",
-                        value: guidance,
-                        onChange: function (e) { setGuidance(e.target.value); },
-                        onKeyDown: function (e) { if (e.key === "Enter" && !e.isComposing && !isRunning) { e.preventDefault(); runGenerate("all"); } }
-                    })
+                h("div", { className: "dsh-tavern-compass-prefs-row" },
+                    h("div", { className: "dsh-tavern-compass-pace-group", role: "group", "aria-label": "推进节奏" },
+                        h("span", { className: "dsh-tavern-compass-label" }, "推进节奏："),
+                        h("div", { className: "dsh-tavern-compass-pace-pills" }, PLOT_COMPASS_PACE_OPTIONS.map(function (opt) {
+                            const selected = currentPace === opt.key;
+                            return h("button", {
+                                key: opt.key,
+                                type: "button",
+                                className: "dsh-tavern-compass-pace-btn" + (selected ? " is-active" : ""),
+                                disabled: Boolean(busyAction),
+                                "aria-pressed": selected ? "true" : "false",
+                                title: opt.title,
+                                onClick: function () {
+                                    if (!selected) savePreferences({ pace: opt.key }, "推进节奏已切换为「" + opt.label + "」");
+                                }
+                            }, opt.label);
+                        }))
+                    ),
+                    h("button", {
+                        type: "button",
+                        className: "dsh-tavern-compass-blindbox-toggle" + (blindBox ? " is-active" : ""),
+                        disabled: Boolean(busyAction),
+                        "aria-pressed": blindBox ? "true" : "false",
+                        title: blindBox ? "盲盒防剧透已开启：隐藏路线详情与终局剧透，点击切回明牌" : "开启盲盒防剧透模式：隐藏节拍/终局剧透详情，仅凭标题与预兆风声游玩",
+                        onClick: function () {
+                            savePreferences({ blindBox: !blindBox }, !blindBox ? "已开启盲盒防剧透模式，卡片剧透详情已遮罩。" : "已切回明牌模式。");
+                        }
+                    }, blindBox ? "🎁 盲盒防剧透：开" : "👁 明牌模式")
+                ),
+                h("div", { className: "dsh-tavern-compass-chat-wrap" },
+                    chatHistory.length > 0 ? h("div", { className: "dsh-tavern-compass-chat-bar" },
+                        h("button", {
+                            type: "button",
+                            className: "dsh-tavern-compass-link-btn",
+                            onClick: function () { setChatOpen(!chatOpen); }
+                        }, (chatOpen ? "▾ 收起" : "▸ 展开") + "脑暴对话（" + chatHistory.length + "）"),
+                        chatOpen ? h("button", {
+                            type: "button",
+                            className: "dsh-tavern-compass-link-btn",
+                            disabled: isRunning || Boolean(busyAction),
+                            onClick: clearCompassChatHistory
+                        }, "清空记录") : null
+                    ) : null,
+                    chatOpen && chatHistory.length > 0 ? h("div", { className: "dsh-tavern-compass-chat-thread", "aria-label": "剧情罗盘脑暴对话记录" },
+                        chatHistory.map(function (msg) {
+                            const isUser = msg.role === "user";
+                            const scopeBadge = msg.scopeApplied === "shortTerm" ? "今期"
+                                : msg.scopeApplied === "midTerm" ? "中期"
+                                : msg.scopeApplied === "longTerm" ? "长期"
+                                : msg.scopeApplied === "all" ? "全部" : "";
+                            return h("div", { key: msg.id, className: "dsh-tavern-compass-chat-msg " + (isUser ? "is-user" : "is-assistant") },
+                                h("div", { className: "dsh-tavern-compass-chat-bubble" }, msg.text),
+                                !isUser ? h("div", { className: "dsh-tavern-compass-chat-msg-foot" },
+                                    scopeBadge
+                                        ? h("button", {
+                                            type: "button",
+                                            className: "dsh-tavern-compass-pill is-active",
+                                            onClick: function () {
+                                                if (msg.scopeApplied && msg.scopeApplied !== "all") setActiveHorizon(msg.scopeApplied);
+                                            }
+                                        }, "★ 已按此对话更新「" + scopeBadge + "」路线")
+                                        : h("div", { className: "dsh-tavern-compass-chat-apply-row" },
+                                            h("button", {
+                                                type: "button",
+                                                className: "dsh-tavern-compass-apply-btn",
+                                                disabled: isRunning || Boolean(busyAction),
+                                                title: "将上面讨论的方案立即生成并更新今期路线卡片",
+                                                onClick: function () { applyBrainstormIdea("shortTerm", msg.text); }
+                                            }, "✨ 应用为今期"),
+                                            h("button", {
+                                                type: "button",
+                                                className: "dsh-tavern-compass-apply-btn",
+                                                disabled: isRunning || Boolean(busyAction),
+                                                title: "将上面讨论的方案同步规划进今/中/长期全部路线",
+                                                onClick: function () { applyBrainstormIdea("all", msg.text); }
+                                            }, "✦ 应用为全局")
+                                        )
+                                ) : null
+                            );
+                        })
+                    ) : null,
+                    h("div", { className: "dsh-tavern-compass-guidance-box" },
+                        h("input", {
+                            type: "text",
+                            className: "dsh-tavern-compass-input",
+                            maxLength: 400,
+                            disabled: isRunning,
+                            placeholder: "聊聊剧情点子或指定发展方向（回车对话商量，不覆盖当前路线）",
+                            value: guidance,
+                            onChange: function (e) { setGuidance(e.target.value); },
+                            onKeyDown: function (e) {
+                                if (e.key === "Enter" && !e.isComposing && !isRunning) {
+                                    e.preventDefault();
+                                    sendCompassChat();
+                                }
+                            }
+                        }),
+                        h("div", { className: "dsh-tavern-compass-guidance-actions" },
+                            h("button", {
+                                type: "button",
+                                className: "dsh-tavern-btn primary",
+                                disabled: isRunning || Boolean(busyAction) || !guidance.trim(),
+                                title: "与剧情罗盘多轮讨论灵感（仅当你在对话里明确要求改路线时才会更新卡片）",
+                                onClick: function () { sendCompassChat(); }
+                            }, isRunning && task.scope === "chat" ? "思考中…" : "💬 发送"),
+                            guidance.trim() ? h("button", {
+                                type: "button",
+                                className: "dsh-tavern-btn",
+                                disabled: isRunning || Boolean(busyAction),
+                                title: "不经对话，直接按输入框方向全局重推今/中/长期路线",
+                                onClick: function () { runGenerate("all"); }
+                            }, "✨ 直接重推") : null
+                        )
+                    )
                 )
             ),
 
             active.count > 0 ? h("section", { className: "dsh-tavern-compass-funnel", "aria-label": "当前锚定漏斗" },
                 h("div", { className: "dsh-tavern-compass-funnel-head" },
                     h("strong", null, "🧭 当前激活方向"),
-                    h("button", {
-                        type: "button",
-                        className: "dsh-tavern-btn",
-                        disabled: Boolean(busyAction),
-                        title: "按当前罗盘路线重新生成下一步行动候选项（带路线角标）",
-                        onClick: refreshCandidatesFromCompass
-                    }, busyAction === "candidates" ? "提交中…" : "生成联动候选项")
+                    h("div", { className: "dsh-tavern-compass-funnel-actions" },
+                        h("button", {
+                            type: "button",
+                            className: "dsh-tavern-compass-link-btn",
+                            disabled: Boolean(busyAction),
+                            title: "在不重推路线的前提下，补充或微调前台正文软引导的侧重点",
+                            onClick: function () { setEditingDirective(!editingDirective); }
+                        }, editingDirective ? "收起微调" : (customDirective ? "✏️ 已设微调引导" : "✏️ 微调引导")),
+                        h("button", {
+                            type: "button",
+                            className: "dsh-tavern-btn",
+                            disabled: Boolean(busyAction),
+                            title: "按当前罗盘路线重新生成下一步行动候选项（带路线角标）",
+                            onClick: refreshCandidatesFromCompass
+                        }, busyAction === "candidates" ? "提交中…" : "生成联动候选项")
+                    )
                 ),
                 h("div", { className: "dsh-tavern-compass-funnel-items" },
                     active.shortTerm ? h("span", { className: "dsh-tavern-compass-funnel-chip", onClick: function () { setActiveHorizon("shortTerm"); } }, "今期：" + active.shortTerm.title) : null,
                     active.midTerm ? h("span", { className: "dsh-tavern-compass-funnel-chip", onClick: function () { setActiveHorizon("midTerm"); } }, "中期：" + active.midTerm.title) : null,
                     active.longTerm ? h("span", { className: "dsh-tavern-compass-funnel-chip", onClick: function () { setActiveHorizon("longTerm"); } }, "长期：" + active.longTerm.title) : null
-                )
+                ),
+                (editingDirective || customDirective) ? h("div", { className: "dsh-tavern-compass-directive-box" },
+                    editingDirective
+                        ? h("div", { className: "dsh-tavern-compass-directive-edit" },
+                            h("input", {
+                                type: "text",
+                                className: "dsh-tavern-compass-input",
+                                maxLength: 240,
+                                placeholder: "微调后台软引导语气或侧重点（如：本段多给对话交锋与误会，先别点破真相）",
+                                value: directiveDraft,
+                                onChange: function (e) { setDirectiveDraft(e.target.value); },
+                                onKeyDown: function (e) {
+                                    if (e.key === "Enter" && !e.isComposing) {
+                                        e.preventDefault();
+                                        savePreferences({ customDirective: directiveDraft }, directiveDraft.trim() ? "已更新微调引导（无需重推路线，下轮立即生效）" : "已清空微调引导").then(function () { setEditingDirective(false); });
+                                    }
+                                }
+                            }),
+                            h("button", {
+                                type: "button",
+                                className: "dsh-tavern-btn primary",
+                                disabled: Boolean(busyAction),
+                                onClick: function () {
+                                    savePreferences({ customDirective: directiveDraft }, directiveDraft.trim() ? "已更新微调引导（无需重推路线，下轮立即生效）" : "已清空微调引导").then(function () { setEditingDirective(false); });
+                                }
+                            }, "应用"),
+                            customDirective ? h("button", {
+                                type: "button",
+                                className: "dsh-tavern-btn",
+                                disabled: Boolean(busyAction),
+                                onClick: function () {
+                                    setDirectiveDraft("");
+                                    savePreferences({ customDirective: "" }, "已清空微调引导").then(function () { setEditingDirective(false); });
+                                }
+                            }, "清空") : null
+                        )
+                        : h("p", { className: "dsh-tavern-compass-meta-line is-subtle" },
+                            h("strong", null, "微调引导："), customDirective
+                        )
+                ) : null
             ) : null,
 
             isRunning ? h("div", { className: "fork-status-alert", "data-kind": "info", role: "status" },
                 h(Spinner, { className: "dsh-tavern-compass-dock-spinner" }),
-                h("span", null, "后台正在结合人物卡、变量状态与世界书暗线推演" + (task.scope === "shortTerm" ? "今期" : task.scope === "midTerm" ? "中期" : task.scope === "longTerm" ? "长期" : "今期 / 中期 / 长期") + "路线…（不影响继续对话）")
+                h("span", null, task.scope === "chat"
+                    ? "脑暴灵感助手正在结合人设、现场定格与世界书暗线构思回复…"
+                    : "后台正在结合人物卡、变量状态与世界书暗线推演" + (task.scope === "shortTerm" ? "今期" : task.scope === "midTerm" ? "中期" : task.scope === "longTerm" ? "长期" : "今期 / 中期 / 长期") + "路线…（不影响继续对话）")
             ) : null,
             task.status === "failed" && task.error ? h("div", { className: "fork-status-alert", "data-kind": "error", role: "alert" },
                 h("span", null, task.error),
-                h("button", { type: "button", disabled: isRunning || Boolean(busyAction), onClick: function () { runGenerate(task.scope || "all"); } }, "重试")
+                task.scope !== "chat" ? h("button", { type: "button", disabled: isRunning || Boolean(busyAction), onClick: function () { runGenerate(task.scope || "all"); } }, "重试") : null
             ) : null,
             localError ? h("div", { className: "fork-status-alert", "data-kind": "error", role: "alert" }, h("span", null, localError)) : null,
             localNotice ? h("p", { className: "dsh-tavern-compass-notice", role: "status" }, localNotice) : null,

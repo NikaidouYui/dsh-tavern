@@ -74,7 +74,9 @@
 					return order;
 				});
 			}
-			const unarchivedHistory = React.useMemo(() => history.filter(item => !archivedSessions.has(item.sessionId)), [history, archivedSessions]);
+			const removingChats = React.useSyncExternalStore(tavernChatRemovals.subscribe, tavernChatRemovals.getSnapshot);
+			const listedHistory = React.useMemo(() => removingChats.size ? history.filter(item => !removingChats.has(item.chatId)) : history, [history, removingChats]);
+			const unarchivedHistory = React.useMemo(() => listedHistory.filter(item => !archivedSessions.has(item.sessionId)), [listedHistory, archivedSessions]);
 			const [historyGroupState, setHistoryGroupState] = React.useState(function () {
 				try { const value = JSON.parse(window.localStorage.getItem("dsh-tavern-history-groups") || "{}"); return value && typeof value === "object" && !Array.isArray(value) ? value : {}; } catch (_) { return {}; }
 			});
@@ -435,7 +437,7 @@
 			if (playWorkspaceResolverRef.current === null) {
 				playWorkspaceResolverRef.current = createPlayWorkspaceResolver({
 					currentWorkspaceId: function () { return playWorkspaceIdRef.current; },
-					resourceRoot: function () { return call("getResourceWorkspace"); },
+					resourceRoot: function (workspaceId) { return call("getResourceWorkspace", { workspaceId: workspaceId }); },
 					createWorkspace: function (input) { return props.workspaces.create(input); }
 				});
 			}
@@ -710,9 +712,8 @@
 			// clearMain() leaves no Session for the host's blank-session entries
 			// (including better-sidebar's bottom-panel toggle) to mount into.
 			async function openBlankConversation() {
-				const targetWorkspaceId = workspaceId || playWorkspaceIdRef.current || "";
 				try {
-					if (!targetWorkspaceId) throw new Error("找不到可用的工作区");
+					const targetWorkspaceId = await playWorkspaceResolverRef.current();
 					await openSessionWhenReady(await props.conversationHost.connectWorkspace(targetWorkspaceId));
 				} catch (err) {
 					props.sessions.clear();
@@ -818,8 +819,8 @@
 				try {
 					const prepared = await call("callOpeningRuntime", { id: draft.id, method: "prepareOpeningPage", args: choice });
 					await newConversation(card, null, choice.openingId, prepared.playerName, prepared.input || undefined, { preparationId: draft.id, replaces: item,
-						onCreated: function (created) { galEnter(created.sessionId, { page: "" }); } });
-				} finally { void call("releaseOpeningPreparation", { id: draft.id }).catch(function () {}); }
+						onCreated: function (created) { galHandover(); galEnter(created.sessionId, { page: "" }); } });
+				} catch (error) { galHandoverEnd(); throw error; } finally { void call("releaseOpeningPreparation", { id: draft.id }).catch(function () {}); }
 			};
 			React.useEffect(function () {
 				const listener = function (event) {
@@ -1252,11 +1253,8 @@
 				finally { setBusy(false); }
 			}
 			async function removeChat(item) {
-				const prepared = await call("prepareDeleteChats", { chatIds: [item.chatId] });
-				if (!prepared.results[0].ok) throw new Error(prepared.results[0].error);
-				try { await props.archiveSession(item.sessionId); }
-				catch (archiveError) { if (!isMissingSessionArchiveError(archiveError)) throw archiveError; }
-				await call("deleteChat", { chatId: item.chatId });
+				const outcome = await deleteTavernChats([item], props.archiveSession);
+				if (outcome.failures.length) throw new Error(outcome.failures[0].error);
 			}
 			async function deleteConversation(item, currentTitle) {
 				setMenuSession(null);
@@ -1269,10 +1267,10 @@
 						if (next) await openSessionWhenReady(next.sessionId);
 						else { await openBlankConversation(); openPicker("cards"); }
 					}
-					// Deleting a chat never touches cards, so reload only the history list.
-					await refresh(["sessions"]);
 				} catch (err) { setError(String(err && err.message || err)); }
-				finally { setBusy(false); }
+				// Deleting a chat never touches cards, so reload only the history list; a failed
+				// deletion reloads it too, or the row would stay listed as it was before.
+				finally { await refresh(["sessions"]); setBusy(false); }
 			}
 			async function forkConversation(item, currentTitle, turn, target) {
 				setMenuSession(null);
@@ -1289,8 +1287,7 @@
 							? { chatId: item.chatId, sessionId: item.sessionId, messageIndex: target.messageIndex, revision: target.revision, messageUid: target.messageUid }
 							: { chatId: item.chatId, sessionId: item.sessionId, turn: Number(turn) || 0 });
 					if (plan.storyDirect) {
-						const targetWorkspaceId = workspaceId || playWorkspaceIdRef.current || "";
-						if (!targetWorkspaceId) throw new Error("找不到可用的工作区");
+						const targetWorkspaceId = await playWorkspaceResolverRef.current();
 						targetSessionId = await props.conversationHost.connectWorkspace(targetWorkspaceId);
 						await ensureTavernPreset(targetSessionId, {});
 					} else targetSessionId = await props.conversationHost.forkSession(item.sessionId, plan.atSeq, { increaseTitle: !duplicate });
@@ -1360,8 +1357,8 @@
 				return unarchivedHistory.filter(function (item) { return groupOfMode(item.mode) === uiMode && (uiMode !== "play" || item.requestMode !== "sillytavern"); });
 			}, [unarchivedHistory, uiMode]);
 			const archivedHistory = React.useMemo(function () {
-				return history.filter(function (item) { return archivedSessions.has(item.sessionId) && groupOfMode(item.mode) === uiMode && (uiMode !== "play" || item.requestMode !== "sillytavern"); });
-			}, [history, archivedSessions, uiMode]);
+				return listedHistory.filter(function (item) { return archivedSessions.has(item.sessionId) && groupOfMode(item.mode) === uiMode && (uiMode !== "play" || item.requestMode !== "sillytavern"); });
+			}, [listedHistory, archivedSessions, uiMode]);
 			const visibleHistory = React.useMemo(function () {
 				return archiveExpanded ? activeHistory.concat(archivedHistory) : activeHistory;
 			}, [archiveExpanded, activeHistory, archivedHistory]);

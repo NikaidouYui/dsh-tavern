@@ -4,6 +4,7 @@ import {selectSessionModel} from './domain/session-model-selection.js'
 import { promptSection } from './domain/prompt-section.js'
 import {createExtensionRequests} from './domain/extension-requests.js'
 import {createModelSlotRegistry} from './domain/model-slot-registry.js'
+import {mvuConditionHolds} from './domain/mvu-visibility.js'
 import {createPresentationObservers} from './domain/presentation-observers.js'
 import {createReplyStreamRewriters} from './domain/reply-stream-rewrite.js'
 import {createSpeechRecognitionHost} from './speech-recognition-host.js'
@@ -151,6 +152,7 @@ import { userMessageForTurn, requestIdForTurn, requestIdForMessages } from './do
 import { createStoryReconciliation } from './domain/story-reconciliation.js'
 import { sessionOpeningDescriptor } from './domain/session-opening.js'
 import { scriptPromptScanText } from './domain/tavern-script-prompts.js'
+import { plotCompassWorldbookScanText } from './domain/plot-compass.js'
 import { createOpeningPreparation } from './domain/opening-preparation.js'
 import { createChatHistoryImportService } from './domain/chat-history-import-service.js'
 import { appendSessionEvent, sessionEvents } from './domain/session-events.js'
@@ -2421,7 +2423,7 @@ export async function apply(ctx) {
     bound: (cardPath, card, chat) => playWorldBook(chat, card),
     runtime: promptTemplateRuntime,
     globalVariables: readPromptTemplateGlobalVariables,
-    scanText: scriptPromptScanText
+    scanText: chat => [scriptPromptScanText(chat), plotCompassWorldbookScanText(chat)].filter(Boolean).join('\n')
   })
   ctx.effect(() => () => projectBuiltinWorldbook.dispose())
   const worldbookStrategies = createWorldbookStrategies({
@@ -2967,6 +2969,8 @@ export async function apply(ctx) {
   // Work other modules report as busy to the deployment gate (getDeploymentActivity).
   const deploymentWork = []
   await stageRuntime.start({hostLibrary, contextHost, dataRoot, activeStageSkin,
+    // the one reader of variable conditions (an asset's recall.when, revealWhen), for the stage's recall.
+    variableConditionHolds: mvuConditionHolds,
     presentationObservers, settlementParticipants, workflow, modelSlots, chatHeaderForSession, dialogueBubbles, activeRoundBodies, voiceBackfillLines, voiceBackfillKept,
     // No background task starts while the game is compacted (ADR 0003); the coordinator's own guard.
     backgroundBlocked: chat => Boolean(autoCompaction?.blocked(chat)),

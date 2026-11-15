@@ -1,5 +1,9 @@
 # DSH Tavern Image
 
+## 3.17.3 插图操作
+
+从悬浮窗或侧栏放大正文插图后，可直接打开该图的改图或重画操作。
+
 ## 3.17.2 ComfyUI 多图输入修复
 
 多图工作流的可选图片分支在本次未提供图片时自动断开；缺少必填图片时在提交前提示节点，避免空路径交给 ComfyUI。
@@ -610,11 +614,11 @@ Tavern 内置配图插件 3.8.0 支持素材库「人物 → 生图 → 配图�
 
 ## 兼容与许可
 
-当前 Tavern 内置生图插件版本为 **3.17.2**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.3.0`，覆盖 DSH 0.1.5 与 0.2.x（含 DeepSeek Harness 0.2.1-rc.2 / Tavern 3.0）；角色历史另外需要 Tavern 插件接口 v2。
+当前 Tavern 内置生图插件版本为 **3.17.3**。插件清单声明的 DSH 兼容范围为 `>=0.1.0-rc.8 <0.3.0`，覆盖 DSH 0.1.5 与 0.2.x（含 DeepSeek Harness 0.2.1-rc.2 / Tavern 3.0）；角色历史另外需要 Tavern 插件接口 v2。
 
 在 DSH 0.2.1-rc.2 + Tavern 3.0.0 上核对过：插件 bundle 正常加载（宿主加载器返回 0 个被跳过的包），本插件调用的 14 个 Tavern 接口（`attach`、`update`、`remove`、`list`、`getTurn`、`readTurnData`、`saveTurnData`、`promptSection`、`onTurnSettled`、`onGameRemoved`、`onTimelineChanged`、`getCardContext`、`backgroundModel`、`apiVersion`）在 Tavern 3.0 中全部保留，3.0 相对 2.7 的接口变化是纯新增（例如 `versionSignal`）。
 
-另有两个可选的宿主放行口子，宿主没有提供时插件照旧：`tavern.beforeImagePlan({gameId, turn, manual, signal})` 在规划某一轮的配图之前调用，插件等它返回后重读这一轮再规划；`tavern.beforeImageGenerate({gameId, turn, subjects, manual, signal})` 在出每一张图之前调用（`subjects` 是这张图规划出的人物），返回 `{skip: true, reason}` 时不出这张，`reason` 写进这一轮的提示。宿主用它们让配图等自己准备好的东西（例如刚出场人物的人物库记录和参考图），什么时候放行由宿主决定。
+另有两个可选的宿主放行口子，宿主没有提供时插件照旧：`tavern.beforeImagePlan({gameId, turn, manual, signal})` 在规划某一轮的配图之前调用，插件等它返回后重读这一轮再规划；`tavern.beforeImageGenerate({gameId, turn, anchor, subjects, manual, signal})` 在出每一张图之前调用（`subjects` 是这张图规划出的人物），返回 `{skip: true, reason}` 时不出这张，`reason` 写进这一轮的提示；返回 `{outfits: {人物 id: 服装 id}}` 时，规划省略这个人的 outfitId 时，这张图就用挂载句 anchor 所在段落的这套服装，参考图和服装文字随之切换；明确填空字符串则不选图库服装。宿主用它告诉插件人物此刻穿哪套。宿主用它们让配图等自己准备好的东西（例如刚出场人物的人物库记录和参考图），什么时候放行由宿主决定。
 
 新包名、浏览器模块加载键、bundle 名称和插件 ID 统一为 `dsh-tavern-image`。旧包名 `dsh-tavern-comfy` 仅用于兼容读取和迁移现有 Profile 注册。
 

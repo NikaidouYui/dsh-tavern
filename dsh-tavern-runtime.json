@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "revision": "4624bf1458dc1281c73270f8394a8e45e7f85af4",
-  "releaseSequence": 9,
+  "revision": "b20cf26939a1a15b33f9f8c1c27bce17a1ac9e75",
+  "releaseSequence": 10,
   "version": "3.3.0",
   "files": [
     {
@@ -1021,8 +1021,8 @@
     },
     {
       "path": "tavern-plugin/lib/client-assets/tavern.css",
-      "sha256": "a28b748f8bfc8df73b088f91378d7ca603db1293956707e7189c5856b44048a4",
-      "size": 452913
+      "sha256": "219b01713bc03e36b5c87d2f7fb4bbf5520dfaff5dbf9fcad376a710e7a968e8",
+      "size": 454101
     },
     {
       "path": "tavern-plugin/lib/client-assets/theme.css",
@@ -1071,8 +1071,8 @@
     },
     {
       "path": "tavern-plugin/lib/client.js",
-      "sha256": "8da4fcd813cabb6e2109cb9e916246082345f142008757c2fa9df332fd266b68",
-      "size": 6463843
+      "sha256": "e34ff43b3bdcf14b98769f77f59a897b6b9419626f23e20c2cc23bc3af323a7e",
+      "size": 6474499
     },
     {
       "path": "tavern-plugin/lib/cordis-inspect.js",
@@ -2701,8 +2701,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/plot-compass-service.js",
-      "sha256": "5206844c5babae260fd20f22bc211bf014e5296d9263445c9cdffe5ae6d5a06a",
-      "size": 28994
+      "sha256": "3d66d870a41733c32ecaa0acf458baae9e62f990ed95b8f45d991849363216ba",
+      "size": 29062
     },
     {
       "path": "tavern-plugin/lib/domain/plot-compass.js",
@@ -3636,8 +3636,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/tavern-settings.js",
-      "sha256": "224e1a385ca2b35d03ddc416a059ffda651e6c61f0fe5a55cf8fae0e55e94c2a",
-      "size": 33964
+      "sha256": "ce9030ea8307da01946ae78c025e731071ca425f641be0108421efe2d249a9cf",
+      "size": 34130
     },
     {
       "path": "tavern-plugin/lib/domain/tavern-skill-provider.js",
@@ -4136,8 +4136,8 @@
     },
     {
       "path": "tavern-plugin/lib/index.js",
-      "sha256": "6323f417a71d1cecb5d4bf41b11ada3719ff8b17fd36b812f9414be688cb2da3",
-      "size": 315055
+      "sha256": "ba0e33acf2c3121f1dd1837837749b5ea896b3ef837628edd922bd22fef0b414",
+      "size": 315736
     },
     {
       "path": "tavern-plugin/lib/metadata-backup.js",
@@ -9306,9 +9306,9 @@
     }
   ],
   "archive": {
-    "commit": "cf8b74a22a231357f7d57ab7443fa460c6eef093",
+    "commit": "0c3fa5fec43b9f12953e799821e008d817087e51",
     "path": "runtime.zip",
-    "sha256": "cbfeccbf64c6900ebebe83f820069563a5b82ceada20795345ed966ee7a66d0b",
-    "size": 16626393
+    "sha256": "f19a84cfd3371570683467a5d8275f0a3a5bd08ba12eb6d16a718113adbd0685",
+    "size": 16628603
   }
 }

@@ -1801,3 +1801,310 @@ test('前端浏览器交互：脑暴对话发送消息、收起展开清空、�
     await browser.close()
   }
 })
+
+test('独立模型配置与回退：generate/chat/syncTurnProgress 全路径走选定模型并在目录缺失时回退后台模型', async t => {
+  const { createBackgroundAgentRunner } = await import('../tavern-plugin/lib/background-agent-runner.js')
+
+  let chat = {
+    id: 'chat-own-model',
+    sessionId: 'sess-own-model',
+    mode: 'story',
+    cardPath: 'cards/test.json',
+    backgroundTasks: { plotCompass: true },
+    backgroundModelSelection: { provider: 'bg', model: 'bg-model' },
+    messages: [
+      { id: 'u1', role: 'user', turn: 1, text: '我故意露出怀表半面纹章' },
+      { id: 'a1', role: 'assistant', turn: 1, text: '沈清弦指尖一顿，目光落在了你露出半角的怀表纹章上，悄然打量起来。' }
+    ]
+  }
+  const worldBooks = { bound: async () => [], constantContext: async () => '' }
+
+  let configuredPlotCompassModel = { provider: 'compass', model: 'compass-pro', reasoningEffort: 'high' }
+  let catalog = [
+    { provider: 'bg', providerName: 'BG', models: [{ id: 'bg-model', name: 'BG Model' }] },
+    { provider: 'compass', providerName: 'Compass', models: [{ id: 'compass-pro', name: 'Compass Pro' }] }
+  ]
+  const resolveSelection = async targetChat => {
+    if (configuredPlotCompassModel && catalog.some(g => g.provider === configuredPlotCompassModel.provider && g.models.some(m => m.id === configuredPlotCompassModel.model))) {
+      return configuredPlotCompassModel
+    }
+    return targetChat.backgroundModelSelection
+  }
+
+  const backgroundTaskPolicies = new Map([['polish', { ownModel: true }], ['plot-compass', { ownModel: true }]])
+  const taskPolicy = input => backgroundTaskPolicies.get(input?.task) || {}
+  const agentCalls = []
+  const progressModelCalls = []
+
+  const runner = createBackgroundAgentRunner({
+    id: () => 'bg-compass-' + agentCalls.length,
+    agents: {
+      get: () => ({ id: chat.sessionId, session: { header: {} } }),
+      async create(options) {
+        const recorded = {
+          provider: options.agentOptions.provider,
+          model: options.agentOptions.model,
+          ...(options.agentOptions.reasoningEffort ? { reasoningEffort: options.agentOptions.reasoningEffort } : {})
+        }
+        agentCalls.push({ modelSelection: recorded })
+        const registered = new Map()
+        const session = { id: options.sessionId, events: [], append(type, data) { this.events.push({ type, data }) } }
+        await options.setup({
+          systemPrompt: { variable() {}, section() {}, suppressRuntimeContext() {} },
+          on() {},
+          tools: { restrict() {}, register(tool) { registered.set(tool.name, tool) } }
+        })
+        let work
+        return {
+          agent: {
+            session,
+            followup() {
+              work = (async () => {
+                const submitTool = registered.get(PLOT_COMPASS_SUBMIT_TOOL_NAME)
+                const isChat = Boolean(submitTool?.parameters?.properties?.reply)
+                await submitTool.execute(isChat
+                  ? { reply: '已收到，可以这样推进。', suggestion: '顺势递出旧信' }
+                  : sampleSubmission())
+                session.append('turn/end', { reason: { kind: 'stop' } })
+              })()
+            },
+            async whenIdle() { await work }
+          },
+          async dispose() {}
+        }
+      }
+    },
+    resolveModelSelection: async input => taskPolicy(input).ownModel
+      ? input.selection
+      : chat.backgroundModelSelection || input.selection
+  })
+  t.after(() => runner.dispose())
+
+  const service = createPlotCompassService({
+    store: {
+      chatForSession: async () => chat,
+      readChat: async () => chat,
+      updateChat: async (_id, updater) => {
+        const res = updater(structuredClone(chat))
+        if (res) chat = res
+        return chat
+      },
+      readCard: async () => SAMPLE_CARD,
+      readScript: async () => null
+    },
+    worldBooks,
+    scripts: { forChat: async () => [] },
+    prompt,
+    selection: resolveSelection,
+    runAgent: input => runner.run(input),
+    callModel: async opts => {
+      progressModelCalls.push(opts)
+      return JSON.stringify({
+        checkedKeys: ['shortTerm:st-probe:0'],
+        evidence: { 'shortTerm:st-probe:0': '目光落在了你露出半角的怀表纹章上' },
+        lapsedHorizons: [],
+        note: '已匹配第一拍'
+      })
+    },
+    onStatus: () => {}
+  })
+
+  // 1. 启用独立模型时：generate、chat、syncTurnProgress 全部使用 compass-pro（且 runner 尊重 ownModel，不回退 bg-model）
+  await service.generate({ sessionId: chat.sessionId, scope: 'all', wait: true })
+  assert.deepEqual(agentCalls.at(-1).modelSelection, { provider: 'compass', model: 'compass-pro', reasoningEffort: 'high' })
+
+  await service.chat({ sessionId: chat.sessionId, message: '帮我想个反套路', wait: true })
+  assert.deepEqual(agentCalls.at(-1).modelSelection, { provider: 'compass', model: 'compass-pro', reasoningEffort: 'high' })
+
+  // 制造未核对的新一轮文本触发 syncTurnProgress
+  chat = {
+    ...chat,
+    messages: [
+      ...chat.messages,
+      { id: 'u2', role: 'user', turn: 2, text: '我亮出火漆印记' },
+      { id: 'a2', role: 'assistant', turn: 2, text: '她目光落在了你露出半角的怀表纹章上，神色微动。' }
+    ]
+  }
+  await service.syncTurnProgress({ sessionId: chat.sessionId, chat, turn: 2 })
+  assert.deepEqual(progressModelCalls.at(-1).selection, { provider: 'compass', model: 'compass-pro', reasoningEffort: 'high' })
+
+  // 2. 所选模型从目录中移除时，安全回退到本局后台模型
+  catalog = [{ provider: 'bg', providerName: 'BG', models: [{ id: 'bg-model', name: 'BG Model' }] }]
+  await service.chat({ sessionId: chat.sessionId, message: '目录下线后重试', wait: true })
+  assert.deepEqual(agentCalls.at(-1).modelSelection, { provider: 'bg', model: 'bg-model' })
+
+  // 3. 设回 null（跟随后台模型），3 条路径全部走 bg-model
+  configuredPlotCompassModel = null
+  await service.generate({ sessionId: chat.sessionId, scope: 'shortTerm', wait: true })
+  assert.deepEqual(agentCalls.at(-1).modelSelection, { provider: 'bg', model: 'bg-model' })
+
+  chat = {
+    ...chat,
+    messages: [
+      ...chat.messages,
+      { id: 'u3', role: 'user', turn: 3, text: '继续追问' },
+      { id: 'a3', role: 'assistant', turn: 3, text: '她目光落在了你露出半角的怀表纹章上，沉默片刻。' }
+    ]
+  }
+  await service.syncTurnProgress({ sessionId: chat.sessionId, chat, turn: 3 })
+  assert.deepEqual(progressModelCalls.at(-1).selection, { provider: 'bg', model: 'bg-model' })
+})
+
+test('前端浏览器交互：剧情罗盘面板展示当前模型状态并支持快捷切换与重置', async () => {
+  const clientSource = await readFile(new URL('../tavern-plugin/lib/client.js', import.meta.url), 'utf8')
+  const parsed = parsePlotCompassSubmission(sampleSubmission(), { scope: 'all', card: SAMPLE_CARD, chat: { mode: 'story' } })
+  const currentCompass = mergePlotCompassUpdate(null, parsed, { scope: 'all', turn: 2 })
+
+  let savedSettings = { plotCompassModel: null }
+  const catalog = [
+    {
+      provider: 'p',
+      providerName: 'MockAI',
+      models: [
+        { id: 'bg-model', name: 'BG Model' },
+        { id: 'compass-model', name: 'Compass Model' }
+      ]
+    }
+  ]
+  const calls = []
+  const browser = await chromium.launch()
+  try {
+    const page = await browser.newPage()
+    const pageErrors = []
+    page.on('pageerror', err => pageErrors.push(String(err)))
+
+    await page.route('http://tavern.test/**', async route => {
+      const url = route.request().url()
+      if (url === 'http://tavern.test/') {
+        return route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="compass-tab"></div>' })
+      }
+      const method = new URL(url).pathname.split('/').at(-1)
+      const args = route.request().postDataJSON() || {}
+      calls.push({ method, args })
+
+      if (method === 'getTavernSettings') {
+        return route.fulfill({ json: { ok: true, settings: savedSettings, modelCatalog: catalog } })
+      }
+      if (method === 'getConversationBackgroundConfig') {
+        return route.fulfill({
+          json: {
+            ok: true,
+            backgroundModel: { provider: 'p', model: 'bg-model' },
+            modelCatalog: catalog
+          }
+        })
+      }
+      if (method === 'getBackgroundModelReasoning') {
+        return route.fulfill({
+          json: { ok: true, reasoning: { efforts: [{ id: 'high', name: 'High' }] } }
+        })
+      }
+      if (method === 'updateTavernSettings') {
+        savedSettings = { ...savedSettings, ...args.patch }
+        return route.fulfill({ json: { ok: true, settings: savedSettings } })
+      }
+
+      const responses = {
+        listSessions: { sessions: [{ sessionId: 'game', chatId: 'chat', mode: 'story', cardName: '沈清弦' }] },
+        getSession: {
+          view: {
+            mode: 'story',
+            latestAssistantTurn: 2,
+            latestAssistantMessageId: 'reply-2',
+            activity: { busy: false },
+            plotCompass: currentCompass,
+            plotCompassEnabled: true,
+            plotCompassTask: { status: 'idle', scope: 'all', error: '' },
+            tavernHelper: { messages: [] }
+          }
+        },
+        getChoices: { candidates: null },
+        syncSession: { sync: { activity: { busy: false, phase: 'idle' } } }
+      }
+      await route.fulfill({ json: { ok: true, ...(responses[method] || {}) } })
+    })
+
+    await page.goto('http://tavern.test/')
+    await page.addScriptTag({ content: await browserReactScript() })
+    await page.addScriptTag({ content: `window.__ModuleLoader__={load(d){window.client=d.factory(name=>name==='react'?modules.react:{});}};` })
+    await page.addScriptTag({ content: clientSource })
+
+    await page.evaluate(() => {
+      window.__settingsChangedCount = 0
+      window.addEventListener('dsh-tavern-settings-changed', () => { window.__settingsChangedCount += 1 })
+      const tabs = {}
+      const noop = () => () => {}
+      const sessionState = { current: 'game', byId: { game: { id: 'game' } } }
+      const ctx = {
+        inject() { return { dispose() {} } },
+        get() {},
+        provide() {},
+        effect(run, label) {
+          if (['dsh-tavern: Tavern workspace browser', 'dsh-tavern: plot compass tab'].includes(label)) return run()
+          return () => {}
+        },
+        slots: {
+          inject(_name, run) { return run() },
+          register() { return () => {} }
+        },
+        sessions: {
+          subagentAddress: () => null,
+          refresh: async () => {},
+          list: { subscribe: noop, getSnapshot: () => sessionState },
+          binding: () => null
+        },
+        workspaces: {},
+        betterSidebar: {
+          registerTab(descriptor) { tabs[descriptor.id] = descriptor; return () => {} },
+          openTab() {}
+        },
+        tavernSessionSignals: { subscribe: noop }
+      }
+      window.client.apply(ctx)
+      const React = modules.react
+      const createRoot = modules['react-dom/client'].createRoot
+      const CompassComponent = tabs['dsh-tavern:plot-compass'].component
+      createRoot(document.querySelector('#compass-tab')).render(React.createElement(CompassComponent, { scope: {} }))
+    })
+
+    // 1. 默认状态展示「跟随后台模型（MockAI: BG Model）」
+    await page.locator('.dsh-tavern-compass-model-badge').filter({ hasText: '跟随后台模型（MockAI: BG Model）' }).waitFor({ timeout: 5000 })
+
+    // 2. 点击「切换模型」展开快捷配置区，并选定独立模型 Compass Model
+    await page.getByRole('button', { name: '切换模型' }).click()
+    const modelBtn = page.locator('button[aria-label^="剧情罗盘模型："]')
+    await modelBtn.waitFor()
+    await modelBtn.click()
+    await page.getByRole('menuitemradio', { name: 'Compass Model' }).click()
+    await page.locator('.dsh-tavern-compass-model-badge.is-custom').filter({ hasText: '独立：MockAI: Compass Model' }).waitFor()
+    assert.deepEqual(
+      calls.filter(c => c.method === 'updateTavernSettings').at(-1).args.patch,
+      { plotCompassModel: { provider: 'p', model: 'compass-model' } }
+    )
+    assert.ok(await page.evaluate(() => window.__settingsChangedCount) >= 1)
+
+    // 3. 选择推理强度 High
+    const effortBtn = page.locator('button[aria-label^="剧情罗盘模型推理强度："]')
+    await page.waitForFunction(() => document.querySelector('button[aria-label^="剧情罗盘模型推理强度："]')?.disabled === false)
+    await effortBtn.click()
+    await page.getByRole('menuitemradio', { name: 'High' }).click()
+    await page.locator('.dsh-tavern-compass-model-badge.is-custom').filter({ hasText: '独立：MockAI: Compass Model · 推理 high' }).waitFor()
+    assert.deepEqual(
+      calls.filter(c => c.method === 'updateTavernSettings').at(-1).args.patch,
+      { plotCompassModel: { provider: 'p', model: 'compass-model', reasoningEffort: 'high' } }
+    )
+
+    // 4. 切回默认「跟随后台模型」
+    await modelBtn.click()
+    await page.getByRole('menuitemradio', { name: '跟随后台模型' }).click()
+    await page.locator('.dsh-tavern-compass-model-badge').filter({ hasText: '跟随后台模型（MockAI: BG Model）' }).waitFor()
+    assert.deepEqual(
+      calls.filter(c => c.method === 'updateTavernSettings').at(-1).args.patch,
+      { plotCompassModel: null }
+    )
+
+    assert.deepEqual(pageErrors, [])
+  } finally {
+    await browser.close()
+  }
+})

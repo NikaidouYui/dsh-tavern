@@ -203,3 +203,40 @@ test('开局默认功能区包含“后台任务附加预设”开关，默认�
   )
 })
 
+test('全局设置页默认模型组展示“剧情罗盘模型”，支持选定独立模型、推理强度并切回跟随后台模型', async t => {
+  const backend = fixture()
+  const { page, calls } = await openTavernSettings(t, { respond: backend.respond })
+  const modelBtn = page.locator('button[aria-label^="剧情罗盘模型："]')
+  await modelBtn.waitFor()
+  assert.equal(await modelBtn.getAttribute('aria-label'), '剧情罗盘模型：跟随后台模型')
+
+  // 1. 选择独立模型
+  await modelBtn.click()
+  await page.getByRole('menuitemradio', { name: /^m$/ }).click()
+  await page.getByText('已保存', { exact: true }).waitFor()
+  assert.deepEqual(
+    calls.filter(call => call.method === 'updateTavernSettings').at(-1).args.patch,
+    { plotCompassModel: { provider: 'p', model: 'm' } }
+  )
+  assert.equal(await modelBtn.getAttribute('aria-label'), '剧情罗盘模型：m')
+
+  // 2. 选择推理强度
+  const effortBtn = page.locator('button[aria-label^="剧情罗盘模型推理强度："]')
+  await page.waitForFunction(() => document.querySelector('button[aria-label^="剧情罗盘模型推理强度："]')?.disabled === false)
+  await effortBtn.click()
+  await page.getByRole('menuitemradio', { name: 'Low' }).click()
+  assert.deepEqual(
+    calls.filter(call => call.method === 'updateTavernSettings').at(-1).args.patch,
+    { plotCompassModel: { provider: 'p', model: 'm', reasoningEffort: 'low' } }
+  )
+
+  // 3. 切回默认“跟随后台模型”
+  await modelBtn.click()
+  await page.getByRole('menuitemradio', { name: '跟随后台模型' }).click()
+  assert.deepEqual(
+    calls.filter(call => call.method === 'updateTavernSettings').at(-1).args.patch,
+    { plotCompassModel: null }
+  )
+  assert.equal(await modelBtn.getAttribute('aria-label'), '剧情罗盘模型：跟随后台模型')
+})
+

@@ -298,8 +298,8 @@ export function applyTavernSettingsPatch(current, patch) {
     if (input.defaultPluginGameSettings !== null && (typeof input.defaultPluginGameSettings !== 'object' || Array.isArray(input.defaultPluginGameSettings))) throw new Error('默认插件本局设置无效')
     next.defaultPluginGameSettings = normalizeDefaultPluginGameSettings(input.defaultPluginGameSettings)
   }
-  // polishModel: 精修's own model for every game; null follows each game's story model.
-  for (const name of ['defaultForegroundModel', 'defaultBackgroundModel', 'defaultWorkbenchModel', 'polishModel']) {
+  // polishModel / plotCompassModel: 精修、剧情罗盘专用模型，null 时各自跟随默认配置（精修随正文，剧情罗盘随后台）。
+  for (const name of ['defaultForegroundModel', 'defaultBackgroundModel', 'defaultWorkbenchModel', 'polishModel', 'plotCompassModel']) {
     if (!Object.hasOwn(input, name)) continue
     const selection = normalizeBackgroundModel(input[name])
     if (input[name] !== null && !selection) throw new Error('默认模型配置无效')
@@ -507,6 +507,7 @@ export function presentTavernSettings(document, defaults) {
     defaultForegroundModel: normalizeBackgroundModel(object(document).defaultForegroundModel),
     defaultBackgroundModel: normalizeBackgroundModel(object(document).defaultBackgroundModel),
     polishModel: normalizeBackgroundModel(object(document).polishModel),
+    plotCompassModel: normalizeBackgroundModel(object(document).plotCompassModel),
     defaultWorkbenchModel: normalizeBackgroundModel(object(document).defaultWorkbenchModel),
     contextCompaction: compactionPolicy(object(document).contextCompaction),
     showPlayProcess: object(document).showPlayProcess === true,

@@ -99,6 +99,30 @@ function PlotCompassDockButton(props) {
     );
 }
 
+function plotCompassHasModelInCatalog(selection, catalog) {
+    if (!selection || !selection.provider || !selection.model) return false;
+    return Array.isArray(catalog) && catalog.some(function (group) {
+        return group && group.provider === selection.provider && Array.isArray(group.models) && group.models.some(function (model) {
+            return model && model.id === selection.model;
+        });
+    });
+}
+
+function plotCompassModelSummaryText(modelState) {
+    const catalog = modelState && Array.isArray(modelState.catalog) ? modelState.catalog : [];
+    const chosen = modelState ? modelState.plotCompassModel : null;
+    const bgModel = modelState ? modelState.backgroundModel : null;
+    const bgLabel = bgModel ? backgroundModelLabel(bgModel, catalog) : "";
+    const bgSuffix = bgLabel ? "（" + bgLabel + "）" : "（跟随本局设置）";
+    if (!chosen) return "跟随后台模型" + bgSuffix;
+    const chosenLabel = backgroundModelLabel(chosen, catalog);
+    const effortSuffix = chosen.reasoningEffort ? " · 推理 " + chosen.reasoningEffort : "";
+    if (catalog.length > 0 && !plotCompassHasModelInCatalog(chosen, catalog)) {
+        return "已选模型不可用（" + chosenLabel + "），已回退后台";
+    }
+    return "独立：" + chosenLabel + effortSuffix;
+}
+
 function TavernPlotCompassTab(props) {
     const h = React.createElement;
     const sessions = props.sessions;
@@ -121,6 +145,9 @@ function TavernPlotCompassTab(props) {
     const [directiveDraft, setDirectiveDraft] = React.useState("");
     const [peekedCards, setPeekedCards] = React.useState({});
     const [chatOpen, setChatOpen] = React.useState(false);
+    const [editingModel, setEditingModel] = React.useState(false);
+    const [modelState, setModelState] = React.useState({ loading: false, saving: false, plotCompassModel: null, backgroundModel: null, catalog: [], error: "", notice: "" });
+    const modelLoadSeqRef = React.useRef(0);
     const [busyAction, setBusyAction] = React.useState("");
     const [localError, setLocalError] = React.useState("");
     const [localNotice, setLocalNotice] = React.useState("");
@@ -141,14 +168,79 @@ function TavernPlotCompassTab(props) {
     const customDirective = String(compass.customDirective || "");
     const chatHistory = Array.isArray(compass.chatHistory) ? compass.chatHistory : [];
 
+    const loadModelConfig = React.useCallback(async function () {
+        if (!play || !sessionId) return;
+        const seq = ++modelLoadSeqRef.current;
+        setModelState(function (prev) { return Object.assign({}, prev, { loading: !prev.catalog.length, error: "" }); });
+        try {
+            const [settingsRes, bgRes] = await Promise.all([
+                rpc("getTavernSettings"),
+                rpc("getConversationBackgroundConfig", { sessionId: sessionId }, sessionId).catch(function () { return null; })
+            ]);
+            if (modelLoadSeqRef.current !== seq) return;
+            setModelState(function (prev) {
+                return Object.assign({}, prev, {
+                    loading: false,
+                    plotCompassModel: settingsRes && settingsRes.settings ? (settingsRes.settings.plotCompassModel || null) : null,
+                    backgroundModel: bgRes ? (bgRes.backgroundModel || null) : prev.backgroundModel,
+                    catalog: Array.isArray(settingsRes && settingsRes.modelCatalog)
+                        ? settingsRes.modelCatalog
+                        : (Array.isArray(bgRes && bgRes.modelCatalog) ? bgRes.modelCatalog : prev.catalog),
+                    error: ""
+                });
+            });
+        } catch (err) {
+            if (modelLoadSeqRef.current !== seq) return;
+            setModelState(function (prev) {
+                return Object.assign({}, prev, { loading: false, error: String(err && err.message || err) });
+            });
+        }
+    }, [play, sessionId]);
+
     React.useEffect(function () {
         setLocalError("");
         setLocalNotice("");
         setEditingArchetypes(false);
         setEditingDirective(false);
+        setEditingModel(false);
         setPeekedCards({});
         setChatOpen(false);
     }, [sessionId]);
+
+    React.useEffect(function () {
+        if (!play || !sessionId) return;
+        void loadModelConfig();
+        function onSettingsChanged() { void loadModelConfig(); }
+        function onBgConfigChanged(event) {
+            const targetId = event && event.detail ? event.detail.sessionId : "";
+            if (!targetId || targetId === sessionId) void loadModelConfig();
+        }
+        window.addEventListener("dsh-tavern-settings-changed", onSettingsChanged);
+        window.addEventListener("dsh-tavern-background-config-changed", onBgConfigChanged);
+        return function () {
+            modelLoadSeqRef.current += 1;
+            window.removeEventListener("dsh-tavern-settings-changed", onSettingsChanged);
+            window.removeEventListener("dsh-tavern-background-config-changed", onBgConfigChanged);
+        };
+    }, [play, sessionId, loadModelConfig]);
+
+    async function savePlotCompassModel(nextSelection) {
+        if (modelState.saving) return;
+        setModelState(function (prev) { return Object.assign({}, prev, { saving: true, error: "", notice: "" }); });
+        try {
+            const result = await rpc("updateTavernSettings", { patch: { plotCompassModel: nextSelection } });
+            const savedModel = result && result.settings ? (result.settings.plotCompassModel || null) : null;
+            setModelState(function (prev) {
+                return Object.assign({}, prev, { saving: false, plotCompassModel: savedModel, error: "", notice: "已保存模型设置" });
+            });
+            window.dispatchEvent(new CustomEvent("dsh-tavern-settings-changed"));
+            notifyTavernDataChanged(["sessions"], "plot-compass");
+        } catch (err) {
+            setModelState(function (prev) {
+                return Object.assign({}, prev, { saving: false, error: String(err && err.message || err), notice: "" });
+            });
+        }
+    }
 
     React.useEffect(function () {
         if (chatHistory.length > 0 && task.scope === "chat") {
@@ -598,6 +690,36 @@ function TavernPlotCompassTab(props) {
                         onClick: function () { editingArchetypes ? setEditingArchetypes(false) : openArchetypeEditor(); }
                     }, editingArchetypes ? "收起" : "定制标签")
                 ),
+                h("div", { className: "dsh-tavern-compass-model-row" },
+                    h("span", { className: "dsh-tavern-compass-label" }, "推演模型："),
+                    h("span", { className: "dsh-tavern-compass-model-badge" + (modelState.plotCompassModel ? " is-custom" : "") },
+                        modelState.loading ? "读取中…" : plotCompassModelSummaryText(modelState)),
+                    h("button", {
+                        type: "button",
+                        className: "dsh-tavern-compass-link-btn",
+                        disabled: Boolean(busyAction),
+                        onClick: function () {
+                            const nextOpen = !editingModel;
+                            setEditingModel(nextOpen);
+                            if (nextOpen) void loadModelConfig();
+                        }
+                    }, editingModel ? "收起" : "切换模型")
+                ),
+                editingModel ? h("div", { className: "dsh-tavern-compass-model-editor" },
+                    h("p", { className: "dsh-tavern-settings-desc" }, "全局生效（覆盖推演、脑暴对话与节拍自动核对）；选择「跟随后台模型」时随各对局后台模型。"),
+                    React.createElement(TavernDefaultModelSetting, {
+                        label: "剧情罗盘模型",
+                        title: "剧情罗盘模型",
+                        description: "从 DSH 已配置模型目录选择；未设置时跟随后台模型",
+                        fallback: "跟随后台模型",
+                        selection: modelState.plotCompassModel,
+                        catalog: modelState.catalog,
+                        disabled: modelState.loading || modelState.saving,
+                        onChange: function (selection) { void savePlotCompassModel(selection); }
+                    }),
+                    modelState.error ? h("div", { className: "fork-status-alert", "data-kind": "error", role: "alert" }, h("span", null, modelState.error)) : null,
+                    modelState.notice ? h("p", { className: "dsh-tavern-compass-notice", role: "status" }, modelState.notice) : null
+                ) : null,
                 editingArchetypes ? h("div", { className: "dsh-tavern-compass-archetype-editor" },
                     h("p", { className: "dsh-tavern-settings-desc" }, "选择或输入 1–5 个游玩题材/流派标签，AI 将按对应戏剧维度发散不同路线："),
                     h("div", { className: "dsh-tavern-compass-preset-tags" }, PLOT_COMPASS_PRESET_ARCHETYPES.map(function (tag) {

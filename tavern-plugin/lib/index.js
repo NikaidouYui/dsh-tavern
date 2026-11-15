@@ -185,7 +185,7 @@ import { withGlobalRegexScripts, composeTavernRegexScripts } from './domain/card
 import { projectCardOpeningPreviews } from './domain/card-opening-previews.js'
 import { createConversationInitialization } from './domain/conversation-initialization.js'
 import { assertConversationForkable, conversationForkReceipt, forkConversationChat } from './domain/conversation-fork.js'
-import { readBackgroundModelReasoning } from './domain/background-model-selection.js'
+import { normalizeBackgroundModel, readBackgroundModelReasoning } from './domain/background-model-selection.js'
 import { createModelCalls } from './domain/model-calls.js'
 import { createPlayCardSnapshots } from './domain/play-card-snapshots.js'
 import { createUserPreferenceProfile } from './domain/user-preference-profile.js'
@@ -786,8 +786,11 @@ export async function apply(ctx) {
   }
   async function updateTavernSettings(patch) {
     if (patch && (Object.hasOwn(patch, 'backgroundModel') || Object.hasOwn(patch, 'backgroundTasks') || Object.hasOwn(patch, 'webSearchEnabled'))) throw new Error('后台配置已移至顶栏的本局设置')
-    for (const name of ['defaultForegroundModel', 'defaultBackgroundModel', 'defaultWorkbenchModel']) {
-      if (patch?.[name] != null) await llm.resolveCallConfig(patch[name])
+    for (const name of ['defaultForegroundModel', 'defaultBackgroundModel', 'defaultWorkbenchModel', 'plotCompassModel']) {
+      if (patch?.[name] == null) continue
+      const normalized = normalizeBackgroundModel(patch[name])
+      if (!normalized) throw new Error('默认模型配置无效')
+      await llm.resolveCallConfig(normalized)
     }
     tavernSettingsDocument = await profileData.updateJson(settingsPath, function (current) {
       return applyTavernSettingsPatch(current, patch)
@@ -2770,7 +2773,7 @@ export async function apply(ctx) {
   // ownModel (keep the selection it brings), webSearch: false, cardContext: false (no card/worldbook injection),
   // frozenContext(input) → a frozen shared context {worldbook, stablePrefix, stablePrefixRevision} or null.
   // The stage module declares its director's; 精修 brings its own model.
-  const backgroundTaskPolicies = new Map([['polish', { ownModel: true }]])
+  const backgroundTaskPolicies = new Map([['polish', { ownModel: true }], ['plot-compass', { ownModel: true }]])
   const taskPolicy = input => backgroundTaskPolicies.get(input?.task) || {}
   const frozenContext = input => taskPolicy(input).frozenContext?.(input) || null
   const contextHost = createContextHost({ pluginApi: { resolveReadCapability: input => pluginApi.resolveReadCapability(input) }, chatForSession, recallHistoryForSession, callModel, runner: () => backgroundAgentRunner })
@@ -2944,6 +2947,13 @@ export async function apply(ctx) {
     },
     onStatus: sessionId => { if (sessionId) sessionSignals.publish(sessionId, { kind: 'tavern-state', version: 'manual-task:' + Date.now() }) }
   })
+  // 剧情罗盘全局模型（plotCompassModel）：未设置或所选模型已下线时，回退至本局后台模型。
+  async function resolvePlotCompassModel(chat) {
+    const chosen = (await readTavernSettings()).plotCompassModel
+    if (chosen && (await tavernModelCatalog()).some(group => group.provider === chosen.provider && group.models.some(model => model.id === chosen.model))) return chosen
+    return backgroundModelSelection(chat)
+  }
+
   const plotCompassService = createPlotCompassService({
     store: {
       chatForSession,
@@ -2958,7 +2968,7 @@ export async function apply(ctx) {
     },
     scripts: scriptContinuity,
     prompt: runtimePrompt,
-    selection: backgroundModelSelection,
+    selection: resolvePlotCompassModel,
     runAgent: input => backgroundAgentRunner.run(input),
     callModel,
     ensureSession: async sessionId => {

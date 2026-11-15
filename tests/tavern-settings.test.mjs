@@ -324,3 +324,37 @@ test('后台任务附加预设默认关闭且校验布尔类型', async () => {
   const patched = applyTavernSettingsPatch({}, { defaultPlaySettings: { backgroundTasks: { preset: true } } })
   assert.equal(patched.defaultPlaySettings.backgroundTasks.preset, true)
 })
+
+test('剧情罗盘模型默认跟随后台，支持独立设置、清除推理强度及非法值拦截', () => {
+  assert.equal(presentTavernSettings({}, {}).plotCompassModel, null)
+
+  const custom = applyTavernSettingsPatch({}, {
+    plotCompassModel: { provider: 'reapi', model: 'deepseek/deepseek-reasoner', reasoningEffort: 'high' }
+  })
+  assert.deepEqual(presentTavernSettings(custom, {}).plotCompassModel, {
+    provider: 'reapi',
+    model: 'deepseek/deepseek-reasoner',
+    reasoningEffort: 'high'
+  })
+
+  // 切回“模型默认”推理强度时会传入 reasoningEffort: null，应被归一化去除该字段
+  const defaultEffort = applyTavernSettingsPatch(custom, {
+    plotCompassModel: { provider: 'reapi', model: 'deepseek/deepseek-reasoner', reasoningEffort: null }
+  })
+  assert.deepEqual(presentTavernSettings(defaultEffort, {}).plotCompassModel, {
+    provider: 'reapi',
+    model: 'deepseek/deepseek-reasoner'
+  })
+
+  // 设回 null 表示恢复“跟随后台模型”
+  const cleared = applyTavernSettingsPatch(defaultEffort, { plotCompassModel: null })
+  assert.equal(presentTavernSettings(cleared, {}).plotCompassModel, null)
+
+  for (const invalid of [{ provider: 'reapi' }, { model: 'only-model' }, 'bad', 123]) {
+    assert.throws(() => applyTavernSettingsPatch({}, { plotCompassModel: invalid }), /默认模型配置无效/)
+  }
+
+  // 验证服务端配置校验与后台任务策略已接通 plotCompassModel 与 plot-compass ownModel
+  assert.match(serverSource, /for \(const name of \['defaultForegroundModel', 'defaultBackgroundModel', 'defaultWorkbenchModel', 'plotCompassModel'\]\)/)
+  assert.match(serverSource, /backgroundTaskPolicies = new Map\(\[\['polish', \{ ownModel: true \}\], \['plot-compass', \{ ownModel: true \}\]\]\)/)
+})

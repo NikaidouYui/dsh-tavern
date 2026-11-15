@@ -328,6 +328,7 @@ function createConversationSettingsModule({
                 setSelection(result.backgroundModel); setTasks(result.backgroundTasks); setFeatures({ ...features, webSearchEnabled: result.webSearchEnabled });
                 setNotice("已保存");
                 invalidateView(props.sessionId);
+                if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("dsh-tavern-background-config-changed", { detail: { sessionId: props.sessionId } }));
             } catch (err) { setError(String(err.message || err)); }
             finally { setBusy(false); }
         }

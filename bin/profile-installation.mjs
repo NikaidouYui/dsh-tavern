@@ -20,6 +20,7 @@ import { patchChatAnswerStep } from './chat-answer-step-patch.mjs'
 import { patchChatReasoningFold } from './chat-reasoning-fold-patch.mjs'
 import { patchChatToolReplyStream } from './chat-tool-reply-stream-patch.mjs'
 import { patchDeepSeekStreamOption } from './deepseek-stream-option-patch.mjs'
+import { patchDeepSeekStreamTimeout, patchPiAiStreamTimeout } from './llm-stream-timeout-patch.mjs'
 import { patchPiAiNonStream } from './pi-ai-nonstream-patch.mjs'
 import { patchPiAiVertexStream, resolveVertexProject } from './pi-ai-vertex-stream-patch.mjs'
 import { patchWebViewportMeta } from './web-viewport-patch.mjs'
@@ -437,6 +438,9 @@ async function installProfileOwned(host, { attemptId, runInstall, runDsh, guiRoo
         const patched = patchDeepSeekStreamOption(deepseek.directory)
         if (patched === null) console.log('当前 DSH 的 DeepSeek 适配器与流式设置补丁不符，已跳过；非流式仍在响应完成后一次性显示。')
         else if (patched) console.log('已为 DeepSeek 适配器启用流式/非流式请求切换。')
+        const timeoutPatched = patchDeepSeekStreamTimeout(deepseek.directory)
+        if (timeoutPatched === null) console.log('当前 DSH 的 DeepSeek 适配器与流式超时补丁不符，已跳过；运行时仍由插件放宽默认超时。')
+        else if (timeoutPatched) console.log('已将 DeepSeek 适配器的默认流式空闲超时放宽到 10 分钟。')
       }
       // 安卓 Chrome 默认只缩可视区（resizes-visual），键盘动画期间布局视口不动，页面只能等
       // visualViewport 的事件 —— 就是「输入法先弹、页面过一会才上移」。让浏览器把键盘算进
@@ -463,6 +467,11 @@ async function installProfileOwned(host, { attemptId, runInstall, runDsh, guiRoo
         const patched = patchPiAiNonStream({ adapterDirectory: piAi.adapter.directory, sdkDirectory: piAi.sdkDirectory })
         if (patched === null) console.log('当前 DSH 的 pi-ai 适配器与非流式补丁不符，已跳过；非流式仍在响应完成后一次性显示。')
         else if (patched) console.log('已为 pi-ai 的 OpenAI 兼容模型启用上游非流式请求。')
+      }
+      if (piAi && !isAsarPath(piAi.adapter.directory)) {
+        const timeoutPatched = patchPiAiStreamTimeout(piAi.adapter.directory)
+        if (timeoutPatched === null) console.log('当前 DSH 的 pi-ai 适配器与流式超时补丁不符，已跳过；运行时仍由插件放宽默认超时。')
+        else if (timeoutPatched) console.log('已将 pi-ai 适配器的默认流式空闲超时放宽到 10 分钟。')
       }
       if (piAi && !isAsarPath(piAi.sdkDirectory)) {
         // Gemini 3/4 answer only at `locations/global`, a resource path: the catalog can

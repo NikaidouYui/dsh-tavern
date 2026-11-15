@@ -19759,7 +19759,7 @@ function tavernModelRefusalNotice(text) {
 		    addEventListener('message', receive);
 		    const requestId = 'opening-preview:' + (++nextId);
 		    return new Promise(function (resolve, reject) {
-		      const timer = setTimeout(function () { pending.delete(requestId); reject(new Error('开场操作超时，请重试')); }, type === 'dsh-tavern-helper-call' ? 300000 : 10000);
+		      const timer = setTimeout(function () { pending.delete(requestId); reject(new Error('开场操作超时，请重试')); }, type === 'dsh-tavern-helper-call' ? 600000 : 10000);
 		      pending.set(requestId, { resolve, reject, timer });
 		      parent.postMessage(Object.assign({ type, token, requestId }, payload), '*');
 		    });

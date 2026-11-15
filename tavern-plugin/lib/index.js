@@ -102,6 +102,7 @@ import { TIMELINE_MEMBERS, participantOf } from './domain/background-members.js'
 import { createPluginSettlementProgress } from './domain/plugin-settlement-progress.js'
 import { readHostCompatibility } from './domain/host-compatibility.js'
 import { installHostSessionPatch } from './domain/host-session-patch.js'
+import { installHostStreamTimeoutPatch } from './domain/host-stream-timeout-patch.js'
 import { installHostSubprocessPatch } from './domain/host-subprocess-patch.js'
 import { installSessionLogAutoRepair, repairStoredSessionLog } from './domain/session-log-repair.js'
 import { measureForegroundPressure } from './domain/foreground-context-pressure.js'
@@ -586,6 +587,12 @@ export async function apply(ctx) {
     ctx.effect(() => restoreSubprocess)
   } catch (error) {
     console.warn('dsh-tavern: Windows 后台窗口补丁未安装：' + error.message)
+  }
+  try {
+    const restoreStreamTimeout = await installHostStreamTimeoutPatch({ persistence })
+    ctx.effect(() => restoreStreamTimeout)
+  } catch (error) {
+    console.warn('dsh-tavern: 模型超时补丁未安装：' + (error?.message || error))
   }
   const sessionPatch = await installHostSessionPatch({
     persistence,

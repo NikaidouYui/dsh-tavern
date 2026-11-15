@@ -7,6 +7,7 @@ import net from 'node:net'
 import { isAsarPath } from './desktop-host-paths.mjs'
 import { discoverVertexProject, patchPiAiVertexStream, repairVertexRouteBaseUrl, resolveVertexProject, vertexApiKeyFrom } from './pi-ai-vertex-stream-patch.mjs'
 import { patchPiAiNonStream } from './pi-ai-nonstream-patch.mjs'
+import { patchDeepSeekStreamTimeout, patchPiAiStreamTimeout } from './llm-stream-timeout-patch.mjs'
 import { patchChatAnswerStep } from './chat-answer-step-patch.mjs'
 import { patchChatReasoningFold } from './chat-reasoning-fold-patch.mjs'
 import { patchChatToolReplyStream } from './chat-tool-reply-stream-patch.mjs'
@@ -401,13 +402,26 @@ async function ensureRuntimePatches(dsh, host) {
   } catch {}
   try {
     const [chat] = resolveHostDependencies({ dsh, host, requiredExports: { '@deepseek-ai/dsh-client-ui-chat': null } })
-    if (!chat || isAsarPath(chat.directory)) return
-    const applied = [
-      ['对话界面', patchChatAnswerStep(chat.directory)],
-      ['思维链流式', patchChatReasoningFold(chat.directory)],
-      ['工具调用流式预览', patchChatToolReplyStream(chat.directory)],
-    ].filter(([, changed]) => changed === true).map(([label]) => label)
-    if (applied.length > 0) console.log(`已补齐 DSH 对话界面补丁：${applied.join('、')}。`)
+    if (chat && !isAsarPath(chat.directory)) {
+      const applied = [
+        ['对话界面', patchChatAnswerStep(chat.directory)],
+        ['思维链流式', patchChatReasoningFold(chat.directory)],
+        ['工具调用流式预览', patchChatToolReplyStream(chat.directory)],
+      ].filter(([, changed]) => changed === true).map(([label]) => label)
+      if (applied.length > 0) console.log(`已补齐 DSH 对话界面补丁：${applied.join('、')}。`)
+    }
+  } catch {}
+  try {
+    const [deepseek] = resolveHostDependencies({ dsh, host, requiredExports: { '@deepseek-ai/dsh-llm-deepseek': null } })
+    if (deepseek && !isAsarPath(deepseek.directory) && patchDeepSeekStreamTimeout(deepseek.directory)) {
+      console.log('已将 DeepSeek 适配器的默认流式空闲超时放宽到 10 分钟。')
+    }
+  } catch {}
+  try {
+    const [piAiAdapter] = resolveHostDependencies({ dsh, host, requiredExports: { '@deepseek-ai/dsh-llm-pi-ai': null } })
+    if (piAiAdapter && !isAsarPath(piAiAdapter.directory) && patchPiAiStreamTimeout(piAiAdapter.directory)) {
+      console.log('已将 pi-ai 适配器的默认流式空闲超时放宽到 10 分钟。')
+    }
   } catch {}
 }
 

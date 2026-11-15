@@ -1,5 +1,5 @@
 /** Model liveness is measured from actual output, never UI heartbeats. */
-export function createBackgroundProgress({idleMs=300000, now=Date.now, onCancel=()=>{}}={}) {
+export function createBackgroundProgress({idleMs=600000, now=Date.now, onCancel=()=>{}}={}) {
   const controller=new AbortController(), startedAt=now()
   let phase='preparing', lastProgressAt=startedAt, timer, attempt, closed=false, failure
   let reject

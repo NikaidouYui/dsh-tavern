@@ -5,12 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/flizzywine/dsh-tavern.git",
+    "url": "git+https://github.com/NikaidouYui/dsh-tavern.git",
     "directory": "tavern-plugin/packages/dsh-tavern"
   },
-  "homepage": "https://github.com/flizzywine/dsh-tavern#readme",
+  "homepage": "https://github.com/NikaidouYui/dsh-tavern#readme",
   "bugs": {
-    "url": "https://github.com/flizzywine/dsh-tavern/issues"
+    "url": "https://github.com/NikaidouYui/dsh-tavern/issues"
   },
   "publishConfig": {
     "access": "public"

@@ -8,7 +8,7 @@ $InstallHost = if ($env:DSH_TAVERN_HOST) { $env:DSH_TAVERN_HOST } else { 'deskto
 if ($InstallHost -notin @('desktop', 'next', 'cli')) { throw "不支持宿主：$InstallHost" }
 if ($LauncherOnly -and $InstallHost -eq 'cli') { throw '--launcher-only 需要桌面宿主。' }
 
-$Repository = if ($env:DSH_TAVERN_REPOSITORY) { $env:DSH_TAVERN_REPOSITORY } else { 'flizzywine/dsh-tavern' }
+$Repository = if ($env:DSH_TAVERN_REPOSITORY) { $env:DSH_TAVERN_REPOSITORY } else { 'NikaidouYui/dsh-tavern' }
 $RepositoryUrl = if ($env:DSH_TAVERN_GIT_URL) { $env:DSH_TAVERN_GIT_URL } else { "https://github.com/$Repository.git" }
 $ArchiveUrl = if ($env:DSH_TAVERN_ARCHIVE_URL) { $env:DSH_TAVERN_ARCHIVE_URL } else { "https://codeload.github.com/$Repository/zip/refs/heads/main" }
 $CommitUrl = if ($env:DSH_TAVERN_COMMIT_URL) { $env:DSH_TAVERN_COMMIT_URL } else { "https://api.github.com/repos/$Repository/commits/main" }
@@ -1305,7 +1305,7 @@ try {
         if (-not (Test-Path -LiteralPath $BundlePackage -PathType Leaf)) { continue }
         $Bundle = Get-Content -Raw -LiteralPath $BundlePackage | ConvertFrom-Json
         $PatchFile = Join-Path $DesktopProfile.FullName "node_modules/$BundleName/cordis.patch.yml"
-        $OwnNext = $Bundle.repository.url -eq 'git+https://github.com/flizzywine/dsh-tavern.git' -and $Bundle.dshTavern.profileHandoff -eq $true
+        $OwnNext = $Bundle.repository.url -eq 'git+https://github.com/NikaidouYui/dsh-tavern.git' -and $Bundle.dshTavern.profileHandoff -eq $true
         $UsesBridge = $Bundle.dsh.bundle.patch -eq './cordis.patch.yml' -and (Test-Path -LiteralPath $PatchFile -PathType Leaf) -and
           (Select-String -LiteralPath $PatchFile -Pattern '^\s*-\s+id:\s+profile-bridge\s*$' -Quiet)
         if ($OwnNext -or $UsesBridge) {
@@ -1314,14 +1314,14 @@ try {
       }
       if ($LauncherProfile.dependencies.'dsh-tavern' -or $LauncherProfile.dsh.profile.bundles -contains 'dsh-tavern') {
         $InstalledLauncher = Get-Content -Raw -LiteralPath (Join-Path $DesktopProfile.FullName 'node_modules/dsh-tavern/package.json') -ErrorAction SilentlyContinue | ConvertFrom-Json
-        if ($InstalledLauncher.repository.url -ne 'git+https://github.com/flizzywine/dsh-tavern.git' -or
+        if ($InstalledLauncher.repository.url -ne 'git+https://github.com/NikaidouYui/dsh-tavern.git' -or
             ($InstalledLauncher.repository.directory -ne 'tavern-plugin/packages/dsh-tavern' -and $InstalledLauncher.dshTavern.profileHandoff -ne $true)) {
           throw '当前 Profile 已有同名的 dsh-tavern 插件，请检查其来源后再安装酒馆。'
         }
       }
       $DesktopCli = if ($InstallHost -eq 'next') { 'resources\app.asar\node_modules\@deepseek-ai\dsh\lib\bin.js' } else { 'resources\app.asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\cli.js' }
       $DesktopCli = Join-Path (Split-Path -Parent $OfficialDesktopExecutable) $DesktopCli
-      $LauncherUrl = 'https://github.com/flizzywine/dsh-tavern/releases/download/launcher-current/dsh-tavern.tgz'
+      $LauncherUrl = 'https://github.com/NikaidouYui/dsh-tavern/releases/download/launcher-current/dsh-tavern.tgz'
       $PreviousNodeMode = $env:ELECTRON_RUN_AS_NODE
       try {
         $env:ELECTRON_RUN_AS_NODE = '1'

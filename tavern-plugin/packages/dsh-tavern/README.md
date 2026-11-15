@@ -4,7 +4,7 @@
 
 > **桌面版支持官方 DeepSeek Harness 0.2.x 和 DSH NEXT**。各平台的安装步骤见[快速开始](#快速开始)。
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/flizzywine/dsh-tavern/main/docs/assets/brand/dsh-tavern-lockup-on-dark.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/NikaidouYui/dsh-tavern/main/docs/assets/brand/dsh-tavern-lockup-on-dark.svg">
     <img src="../../../docs/assets/brand/dsh-tavern-lockup.svg" width="360" alt="DSH 酒馆">
   </picture>
 </p>
@@ -145,12 +145,12 @@
 1. **安装酒馆启动器。** 打开左侧的 **插件 → 添加插件**，粘贴下面的地址，点 **安装**，再按提示启用 **dsh-tavern**。
 
    ```text
-   https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@launcher-cdn-v1.5.3/dsh-tavern-1.5.3.tgz
+   https://cdn.jsdelivr.net/gh/NikaidouYui/dsh-tavern@launcher-cdn-v1.5.3/dsh-tavern-1.5.3.tgz
    ```
 
    已安装旧版启动器时，先在插件页移除旧启动器，再添加新版。
 
-   如果 CDN 地址无法访问，可以粘贴 [GitHub Release 的下载地址](https://github.com/flizzywine/dsh-tavern/releases/download/launcher-current/dsh-tavern.tgz)。
+   如果 CDN 地址无法访问，可以粘贴 [GitHub Release 的下载地址](https://github.com/NikaidouYui/dsh-tavern/releases/download/launcher-current/dsh-tavern.tgz)。
 
 2. **安装酒馆。** 打开 **设置 → 酒馆启动器**，点 **安装酒馆** 并确认。已有兼容的酒馆安装可直接切换。
 3. **打开酒馆。** 点击 **重启并切换到 DSH 酒馆**。下次启动时打开哪个配置，可以在同一页单独设置。
@@ -162,13 +162,13 @@
 Windows（PowerShell）：
 
 ```powershell
-$env:DSH_TAVERN_HOST='desktop'; $tavernInstaller=[Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@runtime-archive-main/install.ps1')); Invoke-Expression $tavernInstaller
+$env:DSH_TAVERN_HOST='desktop'; $tavernInstaller=[Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://cdn.jsdelivr.net/gh/NikaidouYui/dsh-tavern@runtime-archive-main/install.ps1')); Invoke-Expression $tavernInstaller
 ```
 
 macOS（终端）：
 
 ```sh
-curl -fsSL 'https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@runtime-archive-main/install.sh' -o /tmp/dsh-tavern-install.sh && DSH_TAVERN_HOST=desktop sh /tmp/dsh-tavern-install.sh
+curl -fsSL 'https://cdn.jsdelivr.net/gh/NikaidouYui/dsh-tavern@runtime-archive-main/install.sh' -o /tmp/dsh-tavern-install.sh && DSH_TAVERN_HOST=desktop sh /tmp/dsh-tavern-install.sh
 ```
 
 命令执行成功后，重新打开 DeepSeek Harness，从 **设置 → 酒馆启动器** 切换到酒馆。
@@ -184,10 +184,10 @@ curl -fsSL 'https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@runtime-archive-ma
 1. 在 NEXT 的 **桌面设置 → Profile** 选择 `desktop`。打开 **插件 → 添加插件**，粘贴下方地址并启用 `dsh-tavern`。如果该 Profile 里装了旧版酒馆启动器，先从插件页移除旧启动器。
 
    ```text
-   https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@launcher-cdn-v1.5.3/dsh-tavern-1.5.3.tgz
+   https://cdn.jsdelivr.net/gh/NikaidouYui/dsh-tavern@launcher-cdn-v1.5.3/dsh-tavern-1.5.3.tgz
    ```
 
-   CDN 无法访问时，可以使用 [GitHub Release 下载地址](https://github.com/flizzywine/dsh-tavern/releases/download/launcher-current/dsh-tavern.tgz)。
+   CDN 无法访问时，可以使用 [GitHub Release 下载地址](https://github.com/NikaidouYui/dsh-tavern/releases/download/launcher-current/dsh-tavern.tgz)。
 
 2. 打开 **设置 → 酒馆启动器**，点 **安装酒馆** 并确认。按提示从应用菜单或托盘退出 NEXT，安装完成后 NEXT 会重新打开。已有兼容安装时可以直接切换。
 3. 点 **重启并切换到 DSH 酒馆**。想回到日常配置时，在同一页点 **重启并切换到原版 DSH**。
@@ -201,13 +201,13 @@ curl -fsSL 'https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@runtime-archive-ma
 **Windows（PowerShell）**
 
 ```powershell
-$env:DSH_TAVERN_HOST='next'; $tavernInstaller=[Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/flizzywine/dsh-tavern/runtime-archive-main/install.ps1')); Invoke-Expression $tavernInstaller
+$env:DSH_TAVERN_HOST='next'; $tavernInstaller=[Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://raw.githubusercontent.com/NikaidouYui/dsh-tavern/runtime-archive-main/install.ps1')); Invoke-Expression $tavernInstaller
 ```
 
 **macOS（终端）**
 
 ```sh
-curl -fsSL 'https://raw.githubusercontent.com/flizzywine/dsh-tavern/runtime-archive-main/install.sh' -o /tmp/dsh-tavern-install.sh && DSH_TAVERN_HOST=next sh /tmp/dsh-tavern-install.sh
+curl -fsSL 'https://raw.githubusercontent.com/NikaidouYui/dsh-tavern/runtime-archive-main/install.sh' -o /tmp/dsh-tavern-install.sh && DSH_TAVERN_HOST=next sh /tmp/dsh-tavern-install.sh
 ```
 
 执行成功后，打开 DSH NEXT，从 **设置 → 酒馆启动器** 切换到酒馆。
@@ -220,7 +220,7 @@ curl -fsSL 'https://raw.githubusercontent.com/flizzywine/dsh-tavern/runtime-arch
 **Termux**：不想装 APK、或想自己掌控运行环境，用一条命令装命令行版：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/flizzywine/dsh-tavern/main/scripts/termux/termux-tavern.sh -o ~/termux-tavern.sh && bash ~/termux-tavern.sh
+curl -fsSL https://raw.githubusercontent.com/NikaidouYui/dsh-tavern/main/scripts/termux/termux-tavern.sh -o ~/termux-tavern.sh && bash ~/termux-tavern.sh
 ```
 
 始终取 `main` 的最新版；这条命令会完成安装并进入酒馆：脚本会装 Ubuntu 容器、Node、酒馆与移动版布局，启动后打开浏览器。两种方式在手机上的差异、以及 Termux 版的注意事项见 [Termux 一节](https://github.com/flizzywine/dsh-tavern/wiki/Android-%E5%AE%89%E8%A3%85%E4%B8%8E%E6%9B%B4%E6%96%B0#termux在手机里跑命令行版)。
@@ -232,13 +232,13 @@ curl -fsSL https://raw.githubusercontent.com/flizzywine/dsh-tavern/main/scripts/
 Windows（PowerShell）：
 
 ```powershell
-$env:DSH_TAVERN_HOST='cli'; $tavernInstaller=[Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@runtime-archive-main/install.ps1')); Invoke-Expression $tavernInstaller
+$env:DSH_TAVERN_HOST='cli'; $tavernInstaller=[Text.Encoding]::UTF8.GetString((New-Object Net.WebClient).DownloadData('https://cdn.jsdelivr.net/gh/NikaidouYui/dsh-tavern@runtime-archive-main/install.ps1')); Invoke-Expression $tavernInstaller
 ```
 
 macOS / Linux：
 
 ```sh
-curl -fsSL 'https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@runtime-archive-main/install.sh' -o /tmp/dsh-tavern-install.sh && DSH_TAVERN_HOST=cli sh /tmp/dsh-tavern-install.sh
+curl -fsSL 'https://cdn.jsdelivr.net/gh/NikaidouYui/dsh-tavern@runtime-archive-main/install.sh' -o /tmp/dsh-tavern-install.sh && DSH_TAVERN_HOST=cli sh /tmp/dsh-tavern-install.sh
 ```
 
 装好后用 `dsh-tavern start` 启动，按显示的地址在浏览器打开；`dsh-tavern stop` / `status` / `update` 停止、查看、更新。

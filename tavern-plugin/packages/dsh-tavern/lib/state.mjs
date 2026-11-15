@@ -267,7 +267,7 @@ export function hasNextTavern(home) {
     const spec = manifest.dependencies?.[bundle]
     const installed = readManifest(join(profile, 'node_modules', bundle))
     if (installed?.name === bundle && installed.repository?.url === tavernRepository && typeof spec === 'string'
-      && /^(?:(?:github:flizzywine\/dsh-tavern|git\+https:\/\/github\.com\/flizzywine\/dsh-tavern\.git)#(?:plugin-market-next|[a-f0-9]{40})|https:\/\/(?:raw\.githubusercontent\.com\/|cdn\.jsdelivr\.net\/gh\/)flizzywine\/dsh-tavern(?:\/|@)[a-f0-9]{40}\/dsh-tavern-bundle\.tgz)$/iu.test(spec)) return true
+      && /^(?:(?:github:NikaidouYui\/dsh-tavern|git\+https:\/\/github\.com\/NikaidouYui\/dsh-tavern\.git)#(?:plugin-market-next|[a-f0-9]{40})|https:\/\/(?:raw\.githubusercontent\.com\/|cdn\.jsdelivr\.net\/gh\/)NikaidouYui\/dsh-tavern(?:\/|@)[a-f0-9]{40}\/dsh-tavern-bundle\.tgz)$/iu.test(spec)) return true
     const receipt = JSON.parse(readFileSync(join(home, 'logs', 'tavern-installation.json'), 'utf8'))
     return receipt.host === 'next'
   } catch {
@@ -290,7 +290,7 @@ export function canInstallTavern(paths) {
 
 export const LAUNCHER_BUNDLE = 'dsh-tavern'
 
-const tavernRepository = 'git+https://github.com/flizzywine/dsh-tavern.git'
+const tavernRepository = 'git+https://github.com/NikaidouYui/dsh-tavern.git'
 const packageName = /^(?:@[\w.-]+\/)?[\w.-]+$/
 
 function launcherHost(manifest) {

@@ -20,16 +20,16 @@ const RELEASE_FILE = '.dsh-tavern-release.json'
 const RUNNING_TIMEOUT_MS = 15 * 60 * 1000
 // Matches the installation lock's stale-idle limit.
 const ORPHAN_RECORD_MS = 60 * 60 * 1000
-const VERSION_URL = 'https://raw.githubusercontent.com/flizzywine/dsh-tavern/main/package.json'
-const COMMIT_URL = 'https://api.github.com/repos/flizzywine/dsh-tavern/commits/main'
-const COMPARE_URL = 'https://api.github.com/repos/flizzywine/dsh-tavern/compare'
+const VERSION_URL = 'https://raw.githubusercontent.com/NikaidouYui/dsh-tavern/main/package.json'
+const COMMIT_URL = 'https://api.github.com/repos/NikaidouYui/dsh-tavern/commits/main'
+const COMPARE_URL = 'https://api.github.com/repos/NikaidouYui/dsh-tavern/compare'
 const execFileAsync = promisify(execFile)
 const UPDATE_CHECK_POLICY = 5
 const BUSY_PHASES = new Set(['running', 'cancelling', 'blocked'])
-const CDN_METADATA_URL = 'https://cdn.jsdelivr.net/gh/flizzywine/dsh-tavern@runtime-archive-main/dsh-tavern-runtime.json'
+const CDN_METADATA_URL = 'https://cdn.jsdelivr.net/gh/NikaidouYui/dsh-tavern@runtime-archive-main/dsh-tavern-runtime.json'
 // 检查更新先问 GitHub：commits API 判不了时，再读 GitHub 自己发布的运行清单，
 // 最后才用 jsDelivr（分发分支的缓存可能滞后）。
-const GITHUB_MANIFEST_URL = 'https://raw.githubusercontent.com/flizzywine/dsh-tavern/main/dsh-tavern-runtime.json'
+const GITHUB_MANIFEST_URL = 'https://raw.githubusercontent.com/NikaidouYui/dsh-tavern/main/dsh-tavern-runtime.json'
 const RUNTIME_FILES = new Set(['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'cordis.patch.yml', 'install.ps1', 'install.sh'])
 const RUNTIME_DIRECTORIES = ['android/', 'bin/', 'config/', 'presets/', 'tavern-plugin/', 'patches/']
 const RUNTIME_COMPARE_BATCH_SIZE = 8

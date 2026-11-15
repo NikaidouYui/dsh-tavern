@@ -20,7 +20,7 @@ case ${INSTALL_HOST} in
   *) echo "安装失败：不支持宿主 ${INSTALL_HOST}" >&2; exit 1 ;;
 esac
 
-REPOSITORY=${DSH_TAVERN_REPOSITORY:-flizzywine/dsh-tavern}
+REPOSITORY=${DSH_TAVERN_REPOSITORY:-NikaidouYui/dsh-tavern}
 REPOSITORY_URL=${DSH_TAVERN_GIT_URL:-https://github.com/${REPOSITORY}.git}
 ARCHIVE_URL=${DSH_TAVERN_ARCHIVE_URL:-https://codeload.github.com/${REPOSITORY}/tar.gz/refs/heads/main}
 COMMIT_URL=${DSH_TAVERN_COMMIT_URL:-https://api.github.com/repos/${REPOSITORY}/commits/main}
@@ -302,7 +302,7 @@ for (const name of profile.dsh?.profile?.bundles ?? []) {
   let installed
   try { installed = JSON.parse(readFileSync(join(directory, 'node_modules', name, 'package.json'), 'utf8')) } catch { continue }
   const repo = installed.repository?.url
-  const ownNext = repo === 'git+https://github.com/flizzywine/dsh-tavern.git' && installed.dshTavern?.profileHandoff === true
+  const ownNext = repo === 'git+https://github.com/NikaidouYui/dsh-tavern.git' && installed.dshTavern?.profileHandoff === true
   let patch = ''
   if (installed.dsh?.bundle?.patch === './cordis.patch.yml') {
     try { patch = readFileSync(join(directory, 'node_modules', name, 'cordis.patch.yml'), 'utf8') } catch {}
@@ -316,13 +316,13 @@ if (hasBundle('dsh-tavern')) {
   let installed
   try { installed = JSON.parse(readFileSync(join(directory, 'node_modules/dsh-tavern/package.json'), 'utf8')) } catch {}
   const repository = installed?.repository
-  if (repository?.url !== 'git+https://github.com/flizzywine/dsh-tavern.git' || (repository.directory !== 'tavern-plugin/packages/dsh-tavern' && installed.dshTavern?.profileHandoff !== true)) {
+  if (repository?.url !== 'git+https://github.com/NikaidouYui/dsh-tavern.git' || (repository.directory !== 'tavern-plugin/packages/dsh-tavern' && installed.dshTavern?.profileHandoff !== true)) {
     console.error('当前 Profile 已有同名的 dsh-tavern 插件，请检查其来源后再安装酒馆。')
     process.exit(1)
   }
 }
 DSH_CHECK_LAUNCHER
-    launcher_url='https://github.com/flizzywine/dsh-tavern/releases/download/launcher-current/dsh-tavern.tgz'
+    launcher_url='https://github.com/NikaidouYui/dsh-tavern/releases/download/launcher-current/dsh-tavern.tgz'
     dsh plugin --profile desktop add "$launcher_url" || fail '安装酒馆启动器失败。'
     printf '%s\n' '酒馆启动器已安装。打开桌面，进入「设置 → 酒馆启动器 → 安装酒馆」。'
     INSTALL_COMPLETED=1

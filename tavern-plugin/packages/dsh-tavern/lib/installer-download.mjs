@@ -5,7 +5,7 @@ import { describeProxy, fetchProxyEnvironment, proxyEnvironment } from './proxy-
 
 const execute = promisify(execFile)
 const TIMEOUT_MS = 20000
-const REPOSITORY = 'flizzywine/dsh-tavern'
+const REPOSITORY = 'NikaidouYui/dsh-tavern'
 
 function describeFailure(error) {
   if (Number.isInteger(error.status)) return `HTTP ${error.status}`

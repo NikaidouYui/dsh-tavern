@@ -96,8 +96,8 @@ async function slot(work) {
   finally { const next = waiting.shift(); if (next) next(); else active-- }
 }
 async function download(id, face, fetchImpl) {
-  const suffix = `flizzywine/dsh-tavern@${FONT_CATALOG.revision}/tavern-plugin/fonts/${id}/${face.file}`
-  const urls = [`https://cdn.jsdelivr.net/gh/${suffix}`, `https://raw.githubusercontent.com/flizzywine/dsh-tavern/${FONT_CATALOG.revision}/tavern-plugin/fonts/${id}/${face.file}`]
+  const suffix = `NikaidouYui/dsh-tavern@${FONT_CATALOG.revision}/tavern-plugin/fonts/${id}/${face.file}`
+  const urls = [`https://cdn.jsdelivr.net/gh/${suffix}`, `https://raw.githubusercontent.com/NikaidouYui/dsh-tavern/${FONT_CATALOG.revision}/tavern-plugin/fonts/${id}/${face.file}`]
   for (const url of urls) {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 12_000)
     // Node's fetch does not fail a pending body read on abort; the deadline races every read.

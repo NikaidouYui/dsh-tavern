@@ -14,12 +14,12 @@ export function installWorldbookSkillRead(ctx, provider, { virtualOnly = async (
     const requested = exec.arguments?.file_path
     if (String(requested || '').startsWith(WORLDBOOK_SKILL_RESOURCE_ROOT)) throw Error('Worldbook entries now use real files. Use worldbook_list or worldbook_grep for current paths.')
     if (!provider.ownsPath(requested)) {
-      if (await virtualOnly(exec.agent)) throw Error('This game’s read tool is limited to its generated worldbook files')
+      if (await virtualOnly(exec.agent)) throw Error('This game’s read tool is limited to its generated worldbook files. Use worldbook_list or worldbook_grep for current paths.')
       return next()
     }
     exec.signal?.throwIfAborted()
     if (!exec.agent?.session?.id) throw Error('Worldbook files require the current game')
-    if (!await provider.authorizeRead(requested, { scope: exec.agent, signal: exec.signal })) throw Error('Worldbook resource is unknown or no longer available in this game')
+    if (!await provider.authorizeRead(requested, { scope: exec.agent, signal: exec.signal })) throw Error('Worldbook resource is unknown or no longer available in this game. Use worldbook_list or worldbook_grep for current paths.')
     exec.signal?.throwIfAborted()
     return next()
   })

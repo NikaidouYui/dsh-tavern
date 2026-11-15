@@ -2453,9 +2453,7 @@ export async function apply(ctx) {
   ctx.on('agent/pre-step', async (payload, next) => {
     await worldbookSkillProvider.refresh(payload.agent, { signal: payload.signal })
     const snapshot = worldbookSkillProvider.changeSnapshot(payload.agent)
-    if (snapshot && (snapshot.entries.length || sessionEvents(payload.agent.session).some(event => event.data?.source?.worldbookSkills))) {
-      if (appendWorldbookSkillChanges(payload, snapshot)) await sessionStore.flush(payload.agent.session)
-    }
+    if (appendWorldbookSkillChanges(payload, snapshot)) await sessionStore.flush(payload.agent.session)
     return next()
   }, { prepend: true })
   const chatHistoryImporter = createChatHistoryImportService({

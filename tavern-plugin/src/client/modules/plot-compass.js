@@ -690,36 +690,6 @@ function TavernPlotCompassTab(props) {
                         onClick: function () { editingArchetypes ? setEditingArchetypes(false) : openArchetypeEditor(); }
                     }, editingArchetypes ? "收起" : "定制标签")
                 ),
-                h("div", { className: "dsh-tavern-compass-model-row" },
-                    h("span", { className: "dsh-tavern-compass-label" }, "推演模型："),
-                    h("span", { className: "dsh-tavern-compass-model-badge" + (modelState.plotCompassModel ? " is-custom" : "") },
-                        modelState.loading ? "读取中…" : plotCompassModelSummaryText(modelState)),
-                    h("button", {
-                        type: "button",
-                        className: "dsh-tavern-compass-link-btn",
-                        disabled: Boolean(busyAction),
-                        onClick: function () {
-                            const nextOpen = !editingModel;
-                            setEditingModel(nextOpen);
-                            if (nextOpen) void loadModelConfig();
-                        }
-                    }, editingModel ? "收起" : "切换模型")
-                ),
-                editingModel ? h("div", { className: "dsh-tavern-compass-model-editor" },
-                    h("p", { className: "dsh-tavern-settings-desc" }, "全局生效（覆盖推演、脑暴对话与节拍自动核对）；选择「跟随后台模型」时随各对局后台模型。"),
-                    React.createElement(TavernDefaultModelSetting, {
-                        label: "剧情罗盘模型",
-                        title: "剧情罗盘模型",
-                        description: "从 DSH 已配置模型目录选择；未设置时跟随后台模型",
-                        fallback: "跟随后台模型",
-                        selection: modelState.plotCompassModel,
-                        catalog: modelState.catalog,
-                        disabled: modelState.loading || modelState.saving,
-                        onChange: function (selection) { void savePlotCompassModel(selection); }
-                    }),
-                    modelState.error ? h("div", { className: "fork-status-alert", "data-kind": "error", role: "alert" }, h("span", null, modelState.error)) : null,
-                    modelState.notice ? h("p", { className: "dsh-tavern-compass-notice", role: "status" }, modelState.notice) : null
-                ) : null,
                 editingArchetypes ? h("div", { className: "dsh-tavern-compass-archetype-editor" },
                     h("p", { className: "dsh-tavern-settings-desc" }, "选择或输入 1–5 个游玩题材/流派标签，AI 将按对应戏剧维度发散不同路线："),
                     h("div", { className: "dsh-tavern-compass-preset-tags" }, PLOT_COMPASS_PRESET_ARCHETYPES.map(function (tag) {
@@ -757,6 +727,45 @@ function TavernPlotCompassTab(props) {
                         selectedArchetypes.length > 0 ? h("button", { type: "button", className: "dsh-tavern-btn", disabled: Boolean(busyAction), onClick: function () { setSelectedArchetypes([]); } }, "清空") : null
                     )
                 ) : null,
+                (function () {
+                    const modelSummary = modelState.loading ? "读取中…" : plotCompassModelSummaryText(modelState);
+                    return h(React.Fragment, null,
+                        h("div", { className: "dsh-tavern-compass-model-row" },
+                            h("span", { className: "dsh-tavern-compass-label" }, "推演模型："),
+                            h("span", {
+                                className: "dsh-tavern-compass-model-badge" + (modelState.plotCompassModel ? " is-custom" : ""),
+                                title: modelSummary
+                            }, modelSummary),
+                            h("button", {
+                                type: "button",
+                                className: "dsh-tavern-compass-link-btn",
+                                disabled: Boolean(busyAction),
+                                onClick: function () {
+                                    const nextOpen = !editingModel;
+                                    setEditingModel(nextOpen);
+                                    if (nextOpen) void loadModelConfig();
+                                }
+                            }, editingModel ? "收起" : "切换模型")
+                        ),
+                        editingModel ? h("div", { className: "dsh-tavern-compass-model-editor" },
+                            React.createElement(TavernDefaultModelSetting, {
+                                label: "剧情罗盘模型",
+                                title: "剧情罗盘模型",
+                                description: "从 DSH 已配置模型目录选择；未设置时跟随后台模型",
+                                fallback: "跟随后台模型",
+                                selection: modelState.plotCompassModel,
+                                catalog: modelState.catalog,
+                                disabled: modelState.loading || modelState.saving,
+                                onChange: function (selection) { void savePlotCompassModel(selection); }
+                            }),
+                            modelState.error ? h("div", { className: "fork-status-alert", "data-kind": "error", role: "alert" }, h("span", null, modelState.error)) : null,
+                            h("div", { className: "dsh-tavern-compass-model-foot" },
+                                h("span", { className: "dsh-tavern-compass-model-hint" }, "全局生效，未选时跟随各对局后台模型"),
+                                modelState.notice ? h("span", { className: "dsh-tavern-compass-model-saved", role: "status" }, modelState.notice) : null
+                            )
+                        ) : null
+                    );
+                }()),
                 compass.situationDigest ? h("p", { className: "dsh-tavern-compass-digest" }, compass.situationDigest) : null,
                 h("div", { className: "dsh-tavern-compass-prefs-row" },
                     h("div", { className: "dsh-tavern-compass-pace-group", role: "group", "aria-label": "推进节奏" },

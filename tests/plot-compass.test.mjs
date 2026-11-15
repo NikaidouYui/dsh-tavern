@@ -1393,7 +1393,7 @@ test('前端浏览器交互：推进节奏三档切换、盲盒防剧透遮罩/�
     await page.route('http://tavern.test/**', async route => {
       const url = route.request().url()
       if (url === 'http://tavern.test/') {
-        return route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="compass-tab"></div>' })
+        return route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="compass-tab" style="width:460px;"></div>' })
       }
       const method = new URL(url).pathname.split('/').at(-1)
       const args = route.request().postDataJSON() || {}
@@ -1428,6 +1428,9 @@ test('前端浏览器交互：推进节奏三档切换、盲盒防剧透遮罩/�
     })
 
     await page.goto('http://tavern.test/')
+    for (const name of ['tavern.css', 'theme.css']) {
+      await page.addStyleTag({ content: await readFile(new URL('../tavern-plugin/lib/client-assets/' + name, import.meta.url), 'utf8') })
+    }
     await page.addScriptTag({ content: await browserReactScript() })
     await page.addScriptTag({ content: `window.__ModuleLoader__={load(d){window.client=d.factory(name=>name==='react'?modules.react:{});}};` })
     await page.addScriptTag({ content: clientSource })
@@ -1671,7 +1674,7 @@ test('前端浏览器交互：脑暴对话发送消息、收起展开清空、�
     await page.route('http://tavern.test/**', async route => {
       const url = route.request().url()
       if (url === 'http://tavern.test/') {
-        return route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="compass-tab"></div>' })
+        return route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="compass-tab" style="width:460px;"></div>' })
       }
       const method = new URL(url).pathname.split('/').at(-1)
       const args = route.request().postDataJSON() || {}
@@ -1725,6 +1728,9 @@ test('前端浏览器交互：脑暴对话发送消息、收起展开清空、�
     })
 
     await page.goto('http://tavern.test/')
+    for (const name of ['tavern.css', 'theme.css']) {
+      await page.addStyleTag({ content: await readFile(new URL('../tavern-plugin/lib/client-assets/' + name, import.meta.url), 'utf8') })
+    }
     await page.addScriptTag({ content: await browserReactScript() })
     await page.addScriptTag({ content: `window.__ModuleLoader__={load(d){window.client=d.factory(name=>name==='react'?modules.react:{});}};` })
     await page.addScriptTag({ content: clientSource })
@@ -1976,7 +1982,7 @@ test('前端浏览器交互：剧情罗盘面板展示当前模型状态并支�
     await page.route('http://tavern.test/**', async route => {
       const url = route.request().url()
       if (url === 'http://tavern.test/') {
-        return route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="compass-tab"></div>' })
+        return route.fulfill({ status: 200, contentType: 'text/html', body: '<div id="compass-tab" style="width:460px;"></div>' })
       }
       const method = new URL(url).pathname.split('/').at(-1)
       const args = route.request().postDataJSON() || {}
@@ -2025,6 +2031,9 @@ test('前端浏览器交互：剧情罗盘面板展示当前模型状态并支�
     })
 
     await page.goto('http://tavern.test/')
+    for (const name of ['tavern.css', 'theme.css']) {
+      await page.addStyleTag({ content: await readFile(new URL('../tavern-plugin/lib/client-assets/' + name, import.meta.url), 'utf8') })
+    }
     await page.addScriptTag({ content: await browserReactScript() })
     await page.addScriptTag({ content: `window.__ModuleLoader__={load(d){window.client=d.factory(name=>name==='react'?modules.react:{});}};` })
     await page.addScriptTag({ content: clientSource })
@@ -2070,10 +2079,27 @@ test('前端浏览器交互：剧情罗盘面板展示当前模型状态并支�
     // 1. 默认状态展示「跟随后台模型（MockAI: BG Model）」
     await page.locator('.dsh-tavern-compass-model-badge').filter({ hasText: '跟随后台模型（MockAI: BG Model）' }).waitFor({ timeout: 5000 })
 
-    // 2. 点击「切换模型」展开快捷配置区，并选定独立模型 Compass Model
+    // 2. 点击「切换模型」展开快捷配置区，验证两列左对齐并排布局与选定独立模型 Compass Model
     await page.getByRole('button', { name: '切换模型' }).click()
     const modelBtn = page.locator('button[aria-label^="剧情罗盘模型："]')
+    const effortBtn = page.locator('button[aria-label^="剧情罗盘模型推理强度："]')
     await modelBtn.waitFor()
+    await effortBtn.waitFor()
+    const [badgeBox, toggleBox, editorBox, modelBox, effortBox, footBox] = await Promise.all([
+      page.locator('.dsh-tavern-compass-model-badge').boundingBox(),
+      page.locator('.dsh-tavern-compass-model-row .dsh-tavern-compass-link-btn').boundingBox(),
+      page.locator('.dsh-tavern-compass-model-editor').boundingBox(),
+      modelBtn.boundingBox(),
+      effortBtn.boundingBox(),
+      page.locator('.dsh-tavern-compass-model-foot').boundingBox()
+    ])
+    assert.ok(badgeBox && toggleBox && editorBox && modelBox && effortBox && footBox)
+    assert.ok(Math.abs(badgeBox.y - toggleBox.y) <= 8, '状态行徽章与切换按钮应处于同一行')
+    assert.ok(Math.abs(modelBox.y - effortBox.y) <= 4, '模型下拉框与推理强度下拉框应左右并排在同一行')
+    assert.ok(modelBox.x + modelBox.width < effortBox.x, '模型下拉框应位于推理强度下拉框左侧')
+    assert.ok(Math.abs(modelBox.x - editorBox.x) <= 2, '模型下拉框应与编辑区左对齐而非居中')
+    assert.ok(Math.abs(footBox.x - editorBox.x) <= 2, '底部说明行应左对齐')
+
     await modelBtn.click()
     await page.getByRole('menuitemradio', { name: 'Compass Model' }).click()
     await page.locator('.dsh-tavern-compass-model-badge.is-custom').filter({ hasText: '独立：MockAI: Compass Model' }).waitFor()
@@ -2084,7 +2110,6 @@ test('前端浏览器交互：剧情罗盘面板展示当前模型状态并支�
     assert.ok(await page.evaluate(() => window.__settingsChangedCount) >= 1)
 
     // 3. 选择推理强度 High
-    const effortBtn = page.locator('button[aria-label^="剧情罗盘模型推理强度："]')
     await page.waitForFunction(() => document.querySelector('button[aria-label^="剧情罗盘模型推理强度："]')?.disabled === false)
     await effortBtn.click()
     await page.getByRole('menuitemradio', { name: 'High' }).click()

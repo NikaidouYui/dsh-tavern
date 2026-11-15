@@ -65,6 +65,8 @@ export function inputEventForTurn(session, turn) {
   if (start < 0) return null
   for (let index = start + 1; index < events.length; index++) {
     const event = events[index]
+    // 绝不跨越本轮边界（turn/end 或下一轮 turn/start）窃取后续回合的玩家输入。
+    if (event?.type === 'turn/end' || event?.type === 'turn/start') break
     if (isNewTurnInput(event)) return event
   }
   return null

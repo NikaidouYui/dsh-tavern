@@ -460,3 +460,64 @@ test('conversation-initialization 对任何 forkedFrom（含空 messages）均�
   assert.ok(lockCalls.filter(id => id === normalSid).length >= 2)
   assert.equal(maxConcurrent, 1)
 })
+
+test('编辑投影回合后紧跟新玩家轮与失败清理时，inputEventForTurn 与 uncommittedRounds 不跨轮窃取输入伪造假轮', async () => {
+  const { inputEventForTurn } = await import('../tavern-plugin/lib/domain/session-turn-input.js')
+  const { uncommittedRounds } = await import('../tavern-plugin/lib/domain/uncommitted-rounds.js')
+  const { clearFailedTurnSurface } = await import('../tavern-plugin/lib/domain/rollback-surface.js')
+  const { roundAnchor } = await import('../tavern-plugin/lib/domain/round-anchor.js')
+  const session = Session.create('story')
+  const model = { kind: 'model', provider: 'fixture', model: 'fixture' }
+  const text = value => [{ type: 'text', text: value }]
+
+  // Turn 1 开场 + Turn 21 玩家轮
+  appendSessionEvent(session, 'turn/start', { turn: 21 })
+  appendSessionEvent(session, 'step/start', { turn: 21, step: 1 })
+  const u21 = appendSessionEvent(session, 'user/message', { id: 'u21', role: 'user', content: text('行动21'), source: { kind: 'user', rpcId: 'rpc-21' } }, { surfaceOp: 'append' })
+  const a21 = appendSessionEvent(session, 'assistant/message', { turn: 21, step: 1, message: { id: 'a21', role: 'assistant', content: text('原正文21'), source: model } }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/end', { turn: 21, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: 21, reason: { kind: 'completed' } })
+
+  // Turn 22 重摇尝试 + Turn 23 编辑投影替换 Turn 21 的回复
+  appendSessionEvent(session, 'turn/start', { turn: 22 })
+  appendSessionEvent(session, 'step/start', { turn: 22, step: 1 })
+  const r22 = appendSessionEvent(session, 'user/message', { id: 'r22', role: 'user', content: [], source: { kind: 'plugin:dsh-tavern-regen', regenerationId: 'rg-22' } }, { surfaceOp: 'append' })
+  const a22 = appendSessionEvent(session, 'assistant/message', { turn: 22, step: 1, message: { id: 'a22', role: 'assistant', content: text('清晨八点半的阳光...'), source: model } }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/end', { turn: 22, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: 22, reason: { kind: 'completed' } })
+
+  appendSessionEvent(session, 'turn/start', { turn: 23 })
+  appendSessionEvent(session, 'step/start', { turn: 23, step: 1 })
+  const a23 = appendSessionEvent(session, 'assistant/message', {
+    turn: 23, step: 1,
+    message: { id: 'tavern-regen:7c0172a1', role: 'assistant', content: text('清晨八点半的阳光...'), source: { ...model, tavernStoryTurn: 21 } }
+  }, { surfaceOp: { op: 'replace', startSeq: a21.seq, endSeq: a22.seq }, sourceEventSeqs: [a21.seq, r22.seq, a22.seq] })
+  appendSessionEvent(session, 'step/end', { turn: 23, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: 23, reason: { kind: 'completed' } })
+
+  // 紧跟 Turn 24 玩家输入“继续”，随后失败清理
+  appendSessionEvent(session, 'turn/start', { turn: 24 })
+  appendSessionEvent(session, 'step/start', { turn: 24, step: 1 })
+  appendSessionEvent(session, 'user/message', { id: 'u24', role: 'user', content: text('继续'), source: { kind: 'user', rpcId: 'rpc-24' } }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'step/end', { turn: 24, step: 1 })
+  appendSessionEvent(session, 'turn/end', { turn: 24, reason: { kind: 'error', message: 'TRANSPORT' } })
+  clearFailedTurnSurface({ session, turn: 24 })
+
+  const chat = {
+    id: 'game', mode: 'story',
+    regeneratedDshTurns: { '21': 22 },
+    suppressedDshTurns: [22],
+    nativeCommits: { '21': { seq: a23.seq } },
+    messages: [
+      { role: 'user', text: '行动21' },
+      { role: 'assistant', turn: 21, text: '清晨八点半的阳光...', nativeAnchor: roundAnchor(21, u21, a21) }
+    ]
+  }
+
+  assert.equal(inputEventForTurn(session, 23), null, 'Turn 23 自身没有输入，绝不越界窃取 Turn 24 的输入')
+  assert.deepEqual(uncommittedRounds(session, chat), [], '编辑投影回合 23 不得借用后续输入与他人投影伪造成未提交轮')
+
+  const h = harness({ session, chat })
+  await h.service.reconcileWhenIdle('story')
+  assert.equal(h.saved().messages.length, 2, '闲置核对不得向存档补写假轮')
+})

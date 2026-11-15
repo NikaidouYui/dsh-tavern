@@ -8,7 +8,7 @@ import { sessionEvents, surfaceReplacementRange } from './session-events.js'
 import { createSurfaceOwnership, planSurfaceRecovery, planSurfaceRange, SurfaceRecoveryError, OWNED } from './surface-recovery.js'
 import { randomUUID } from 'node:crypto'
 import { inputKind, isTurnInput, isNewTurnInput, isNewPlayerInput, isFailedTurnEnd } from './session-turn-input.js'
-import { resolveRoundAnchor } from './round-anchor.js'
+import { resolveRoundAnchor, validAnchor } from './round-anchor.js'
 import { isPluginSource, isProducerSource, sourceProducerName } from './message-source.js'
 
 function object(value) {
@@ -76,7 +76,7 @@ function isForegroundContext(event) {
     ['foreground-frame', 'worldbook-snapshot', 'snapshot', 'variable-changes'].includes(source.form)
 }
 
-function isRollbackUserTombstone(event) {
+export function isRollbackUserTombstone(event) {
   const source = event && event.type === 'user/message' && event.data && event.data.source
   const producer = sourceProducerName(source)
   return producer !== '' && (
@@ -637,9 +637,16 @@ export function replayablePersistedTurn(chat, { events = [], nodes = [] } = {}) 
 }
 
 /** 存档行记着的原生位置就是这一条：投影/修复换了轮号也仍然是这一轮。 */
-export function anchoredToSaveRow(target, row) {
-  const reply = Number(row && row.nativeAnchor ? row.nativeAnchor.reply : NaN)
-  return Number.isSafeInteger(reply) && reply >= 0 && reply === Number(target && target.assistantSeq)
+export function anchoredToSaveRow(target, row, evidence = null) {
+  const anchor = row && row.nativeAnchor
+  if (!anchor || !target) return false
+  if (evidence && validAnchor(anchor)) {
+    const resolved = resolveRoundAnchor(evidence, anchor)
+    if (!resolved || resolved.input === null || resolved.reply === null) return false
+    return Number(resolved.input) === Number(target.userSeq) && Number(resolved.reply) === Number(target.assistantSeq)
+  }
+  const reply = Number(anchor.reply ?? NaN)
+  return Number.isSafeInteger(reply) && reply >= 0 && reply === Number(target.assistantSeq)
 }
 
 /** 消息面上的正文文本：投影、修复写回的条目会带着别的轮号，正文本身才是它。 */
@@ -648,20 +655,35 @@ export function surfaceReplyText({ events = [], seq } = {}) {
   return event && event.type === 'assistant/message' ? contentText(event.data && event.data.message) : ''
 }
 
+/** 判定事件是否仍为当前模型上下文中有效、未压缩且未被清理的玩家输入节点。 */
+export function isActiveTurnInputNode(event) {
+  return Boolean(
+    event
+    && event.type === 'user/message'
+    && !isCompactionCheckpoint(event)
+    && !isRollbackUserTombstone(event)
+    && (isTurnInput(event.data) || !isPluginSource(event.data?.source))
+  )
+}
+
 export function locateRollbackSurface(input) {
   const events = Array.isArray(input && input.events) ? input.events : []
   const nodes = Array.isArray(input && input.nodes) ? input.nodes : []
   let userIndex = -1
   // An anchored round says where its input is; no scan, no guess (round-anchor.js).
   const anchored = resolveRoundAnchor({ events, nodes }, input && input.anchor)
-  const anchoredInput = anchored && anchored.input !== null ? eventAt(events, anchored.input) : null
-  if (anchoredInput?.type === 'user/message' && isTurnInput(anchoredInput.data)) userIndex = nodes.indexOf(anchored.input)
+  if (anchored !== null) {
+    const anchoredInput = anchored.input !== null ? eventAt(events, anchored.input) : null
+    // 有效锚点对应的输入已丢失、压缩或变为清理占位时直接拒绝，禁止退化为向后误抓上一轮输入。
+    if (!isActiveTurnInputNode(anchoredInput)) return null
+    userIndex = nodes.indexOf(anchored.input)
+  }
   for (let index = nodes.length - 1; userIndex < 0 && index >= 0; index -= 1) {
     const event = eventAt(events, nodes[index])
     if (isCompactionCheckpoint(event)) return null
     // The round starts at its input: messages other plugins or card scripts add
     // around it belong to the round and go with it, never stand in for it.
-    if (event && event.type === 'user/message' && (isTurnInput(event.data) || !isPluginSource(event.data?.source)) && !isRollbackUserTombstone(event)) {
+    if (isActiveTurnInputNode(event)) {
       userIndex = index
       break
     }
@@ -692,6 +714,7 @@ export function locateRollbackSurface(input) {
   // 唯一不能跨过的是另一轮真正的输入。
   const eventsBySeq = new Map()
   for (const event of events) if (event && Number.isFinite(Number(event.seq))) eventsBySeq.set(Number(event.seq), event)
+  if (anchored !== null && (anchored.reply === null || Number(anchored.reply) !== Number(assistantEvent.seq))) return null
   const range = planSurfaceRange({ nodes, start: nodes[userIndex], end: nodes.at(-1),
     accepts: seq => {
       const event = eventsBySeq.get(Number(seq))
@@ -1102,19 +1125,34 @@ function incompleteReplyTarget(chat, failedTurns) {
 }
 
 // UI and mutation share the same native target and failed-tail precedence.
+/** 待回退范围不得覆盖上一条仍需保留的存档消息或其锚定正文。 */
+function targetOverlapsPreviousRow(target, messages, latestIndex, evidence) {
+  if (!target || latestIndex <= 0) return false
+  const previous = messages.slice(0, latestIndex).findLast(message => message?.role === 'assistant')
+  const resolved = previous && validAnchor(previous.nativeAnchor) ? resolveRoundAnchor(evidence, previous.nativeAnchor) : null
+  if (!resolved) return false
+  const shadowed = new Set((Array.isArray(target.shadowedSeqs) ? target.shadowedSeqs : []).map(Number))
+  return (resolved.input !== null && shadowed.has(Number(resolved.input)))
+    || (resolved.reply !== null && shadowed.has(Number(resolved.reply)))
+}
+
 function planRollbackAvailability(chat, { events = [], nodes = [] } = {}) {
   const unclearedTurns = unclearedFailedTail(chat, events, nodes)
   const failedTurns = [...new Set([...pendingFailedSurfaceTurns({ events, nodes, suppressed: chat.suppressedDshTurns || [] }), ...unclearedTurns])].sort((a, b) => a - b)
   const clearIncompleteReplyTarget = incompleteReplyTarget(chat, failedTurns)
   if (failedTurns.length) return { canRollback: true, canClearIncompleteReply: true, clearIncompleteReplyTarget, failedTurns, unclearedTurns, target: null, reason: '' }
   const messages = Array.isArray(chat.messages) ? chat.messages : []
-  const latest = messages.findLast(message => message?.role === 'assistant' && message.greeting !== true)
-  const target = locateRollbackSurface({ events, nodes, anchor: latest?.nativeAnchor })
+  const latestIndex = messages.findLastIndex(message => message?.role === 'assistant' && message.greeting !== true)
+  const latest = latestIndex >= 0 ? messages[latestIndex] : undefined
+  const evidence = { events, nodes }
+  const located = locateRollbackSurface({ ...evidence, anchor: latest?.nativeAnchor })
+  const target = located && !targetOverlapsPreviousRow(located, messages, latestIndex, evidence) ? located : null
   if (isRescuedHistoryMessage(chat, latest)) return { canRollback: false, canClearIncompleteReply: false, failedTurns, target: null, reason: '存档救援导入的历史不可回退，请发送新消息继续' }
   const turn = Number(latest?.turn)
-  const matchesTurn = Boolean(target && (!(turn > 0) || target.turn === turn || target.turn === Number(chat.regeneratedDshTurns?.[String(turn)])))
+  const anchorMatches = !validAnchor(latest?.nativeAnchor) || anchoredToSaveRow(target, latest, evidence)
+  const matchesTurn = Boolean(target && anchorMatches && (!(turn > 0) || target.turn === turn || target.turn === Number(chat.regeneratedDshTurns?.[String(turn)])))
   // 投影/修复写回的正文会带着别的剧情轮号：存档行记着它指的就是这一条，就还是这一轮。
-  const matchesAnchor = Boolean(target && !matchesTurn && anchoredToSaveRow(target, latest))
+  const matchesAnchor = Boolean(target && !matchesTurn && anchoredToSaveRow(target, latest, evidence))
   const matches = matchesTurn || matchesAnchor
   const hasMessages = hasRollbackMessages(messages)
   const canRollback = hasMessages && Boolean(matches)

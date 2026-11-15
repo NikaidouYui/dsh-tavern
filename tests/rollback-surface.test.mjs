@@ -206,3 +206,45 @@ test('an upgraded appended repair body maps its story turn to the administrative
   assert.equal(turns.get(1), 1)
   assert.equal(turns.get(2), 3)
 })
+
+test('锚点输入变为清理占位或范围侵占前一条保留行时，禁止越轮向后吞并上一轮', () => {
+  const model = modelSource()
+  const events = [
+    { seq: 10, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '第21轮输入' }], source: { kind: 'user' } }, surfaceOp: 'append' },
+    { seq: 11, type: 'assistant/message', data: { turn: 21, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '第21轮正文' }], source: model } }, surfaceOp: 'append' },
+    { seq: 15, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '第24轮失败输入' }], source: { kind: 'user' } }, surfaceOp: 'append' },
+    // 复现：第 24 轮失败清理占位被错误模板同步写回文本但保留 failed-turn-cleanup 来源，假第 23 轮锚定 input=15, reply=11。
+    { seq: 20, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '继续' }], source: { kind: 'plugin:dsh-tavern-failed-turn-cleanup' } },
+      surfaceOp: { op: 'replace', start: 15, end: 15 }, sourceEventSeqs: [15] }
+  ]
+
+  const corruptAnchor = { formatVersion: 4, turn: 23, input: 15, reply: 11 }
+  assert.equal(locateRollbackSurface({ events, nodes: [10, 11, 20], anchor: corruptAnchor }), null, '有效锚点指向清理占位时绝不越轮回溯抓走第 21 轮')
+
+  const corruptedChat = {
+    messages: [
+      { role: 'user', text: '第21轮输入' },
+      { role: 'assistant', turn: 21, text: '第21轮正文', nativeAnchor: { formatVersion: 4, turn: 21, input: 10, reply: 11 } },
+      { role: 'user', text: '继续' },
+      { role: 'assistant', turn: 23, text: '第21轮正文' }
+    ]
+  }
+  const blocked = rollbackAvailability(corruptedChat, { events, nodes: [10, 11, 20] })
+  assert.equal(blocked.canRollback, false, '即便最新假行没有 nativeAnchor，待回退区间会吞掉上一条保留行第 21 轮也必须拦截')
+  assert.equal(blocked.target, null)
+
+  // 正常经过失败清理占位之后的新轮回退 -> 再回退更早轮次：两轮之间隔着 cleanup 占位与后轮回退墓碑，仍可连续回退第 21 轮。
+  const cleanEvents = [
+    events[0],
+    events[1],
+    events[2],
+    { seq: 20, type: 'user/message', data: { role: 'user', content: [], source: { kind: 'plugin:dsh-tavern-failed-turn-cleanup' } }, surfaceOp: { op: 'replace', start: 15, end: 15 }, sourceEventSeqs: [15] },
+    { seq: 30, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '第25轮输入' }], source: { kind: 'user' } }, surfaceOp: 'append' },
+    { seq: 31, type: 'assistant/message', data: { turn: 25, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '第25轮正文' }], source: model } }, surfaceOp: 'append' },
+    { seq: 32, type: 'assistant/message', data: { turn: 25, step: 1, message: { role: 'assistant', content: [] } }, surfaceOp: { op: 'replace', start: 30, end: 31 }, sourceEventSeqs: [30, 31] }
+  ]
+  const afterRoll25 = locateRollbackSurface({ events: cleanEvents, nodes: [10, 11, 20, 32], anchor: { formatVersion: 4, turn: 21, input: 10, reply: 11 } })
+  assert.equal(afterRoll25.userSeq, 10)
+  assert.equal(afterRoll25.assistantSeq, 11)
+  assert.deepEqual(afterRoll25.shadowedSeqs, [10, 11, 20, 32])
+})

@@ -121,3 +121,41 @@ test('DSH 0.2.1 的压缩检查点（source.kind = compact-checkpoint）同样�
   const written = session.snapshotEvents().slice(before)
   assert.ok(!written.some(event => event.data?.source?.kind === 'compact-checkpoint'), JSON.stringify(written.map(event => event.type)))
 })
+
+test('模板历史同步与锚点匹配忽略 failed-turn-cleanup 清理占位，不把它改写回带文本的消息', async () => {
+  const { clearFailedTurnSurface } = await import('../tavern-plugin/lib/domain/rollback-surface.js')
+  const { roundAnchor } = await import('../tavern-plugin/lib/domain/round-anchor.js')
+  const session = Session.create('template-cleanup-tombstone')
+  const model = { kind: 'model', provider: 'fixture', model: 'fixture' }
+  const text = value => [{ type: 'text', text: value }]
+
+  session.append('turn/start', { turn: 1 })
+  const u1 = session.append('user/message', { id: 'u1', role: 'user', content: text('行动1'), source: { kind: 'user' } }, { surfaceOp: 'append' })
+  const a1 = session.append('assistant/message', { turn: 1, step: 1, message: { id: 'a1', role: 'assistant', content: text('回复1'), source: model } }, { surfaceOp: 'append' })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  session.append('turn/start', { turn: 2 })
+  const u2 = session.append('user/message', { id: 'u2', role: 'user', content: text('失败输入'), source: { kind: 'user' } }, { surfaceOp: 'append' })
+  session.append('turn/end', { turn: 2, reason: { kind: 'error' } })
+  assert.equal(clearFailedTurnSurface({ session, turn: 2 }), 1)
+
+  const cleanupSeq = session.surface.nodes.at(-1)
+  const badAnchor = roundAnchor(2, typeof u2 === 'number' ? { seq: u2 } : u2, typeof a1 === 'number' ? { seq: a1 } : a1)
+  const before = { messages: [
+    { role: 'user', text: '行动1' },
+    { role: 'assistant', turn: 1, text: '回复1', nativeAnchor: roundAnchor(1, typeof u1 === 'number' ? { seq: u1 } : u1, typeof a1 === 'number' ? { seq: a1 } : a1) },
+    { role: 'user', text: '失败输入' },
+    { role: 'assistant', turn: 2, text: '回复1', nativeAnchor: badAnchor }
+  ] }
+  const after = structuredClone(before)
+  after.messages[2].text = '改写后的失败输入'
+  prepareTemplateHistory(session, before, after)
+  assert.equal(after.messages[2].templateHistoryEdit, undefined, '清理占位不得成为 templateHistoryEdit 目标')
+
+  after.messages[2].templateHistoryEdit = { id: 'tavern-template-edit:forced', seq: cleanupSeq, role: 'user' }
+  const countBeforeSync = sessionEvents(session).length
+  await synchronizeTemplateHistory(session, after, async () => {})
+  assert.equal(sessionEvents(session).length, countBeforeSync, '显式指向清理占位的 templateHistoryEdit 也不得写回')
+  const texts = session.deriveMessages().flatMap(m => m.content.filter(b => b.type === 'text').map(b => b.text))
+  assert.ok(!texts.includes('改写后的失败输入'))
+})

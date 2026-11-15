@@ -36,6 +36,13 @@ export function uncommittedRounds(session, header = {}) {
     // The reply must still be what the model sees: a rolled-back round is tombstoned.
     // 投影/修复写回会把正文换成新的 seq，位置变了但正文还在面上，就算仍然可见。
     if (!reply || reply.text === '') continue
+    // 投影/重生成写回的正文带有其它剧情轮的 tavernStoryTurn，不属于该原生编辑回合本身的新回答。
+    const projectedStoryTurn = Number(reply.event?.data?.message?.source?.tavernStoryTurn)
+    const isForeignProjection = Boolean(
+      reply.event?.surfaceOp && typeof reply.event.surfaceOp === 'object' && reply.event.surfaceOp.op === 'replace'
+      && Number.isSafeInteger(projectedStoryTurn) && projectedStoryTurn > 0 && projectedStoryTurn !== hostTurn
+    )
+    if (isForeignProjection) continue
     if (!nodes.has(Number(reply.event.seq)) && !surfaceShowsText(session, nodes, reply.text)) continue
     rounds.push({ turn: hostTurn, requestId: String(input.source.rpcId ?? '').trim(), userText: contentText(input), userContent: input.content || [], assistantText: reply.text, nativeAnchor: roundAnchor(hostTurn, inputEvent, reply.event) })
   }

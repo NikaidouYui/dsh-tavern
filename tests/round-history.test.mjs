@@ -1052,3 +1052,153 @@ test('原生重新生成向 prepareRegenerationReply 传入 hostRegex: true 与 
   assert.equal(h.chat.candidates?.choices?.length, 4, '重新生成 extracted candidates 正常保留')
 })
 
+test('复制完整会话（含重生成、失败清理占位与 session/end-seed）后连续多次回退均畅通成功', async () => {
+  const { Session } = await import('./fixtures/dsh-session-host.mjs')
+  const { appendSessionEvent, sessionEvents } = await import('../tavern-plugin/lib/domain/session-events.js')
+  const { roundAnchor } = await import('../tavern-plugin/lib/domain/round-anchor.js')
+  const { forkConversationChat } = await import('../tavern-plugin/lib/domain/conversation-fork.js')
+  const { rollbackAvailability } = await import('../tavern-plugin/lib/domain/rollback-surface.js')
+
+  const model = { kind: 'model', provider: 'fixture', model: 'fixture' }
+  const text = value => [{ type: 'text', text: value }]
+  const srcSession = Session.create('src-dup-rollback')
+
+  appendSessionEvent(srcSession, 'turn/start', { turn: 1 })
+  appendSessionEvent(srcSession, 'step/start', { turn: 1, step: 1 })
+  appendSessionEvent(srcSession, 'assistant/message', { turn: 1, step: 1, message: { id: 'opening', role: 'assistant', content: text('开场白'), source: model } }, { surfaceOp: 'append' })
+  appendSessionEvent(srcSession, 'step/end', { turn: 1, step: 1 })
+  appendSessionEvent(srcSession, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+  // Turn 2 + 重生成 Turn 3 + 编辑投影 Turn 4
+  appendSessionEvent(srcSession, 'turn/start', { turn: 2 })
+  appendSessionEvent(srcSession, 'step/start', { turn: 2, step: 1 })
+  const u2 = appendSessionEvent(srcSession, 'user/message', { id: 'u2', role: 'user', content: text('第2轮输入'), source: { kind: 'user', rpcId: 'rpc-2' } }, { surfaceOp: 'append' })
+  const a2 = appendSessionEvent(srcSession, 'assistant/message', { turn: 2, step: 1, message: { id: 'a2', role: 'assistant', content: text('原正文2'), source: model } }, { surfaceOp: 'append' })
+  appendSessionEvent(srcSession, 'step/end', { turn: 2, step: 1 })
+  appendSessionEvent(srcSession, 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+
+  appendSessionEvent(srcSession, 'turn/start', { turn: 3 })
+  appendSessionEvent(srcSession, 'step/start', { turn: 3, step: 1 })
+  const r3 = appendSessionEvent(srcSession, 'user/message', { id: 'r3', role: 'user', content: [], source: { kind: 'plugin:dsh-tavern-regen', regenerationId: 'rg-3' } }, { surfaceOp: 'append' })
+  const a3 = appendSessionEvent(srcSession, 'assistant/message', { turn: 3, step: 1, message: { id: 'a3', role: 'assistant', content: text('重摇正文2'), source: model } }, { surfaceOp: 'append' })
+  appendSessionEvent(srcSession, 'step/end', { turn: 3, step: 1 })
+  appendSessionEvent(srcSession, 'turn/end', { turn: 3, reason: { kind: 'completed' } })
+
+  appendSessionEvent(srcSession, 'turn/start', { turn: 4 })
+  appendSessionEvent(srcSession, 'step/start', { turn: 4, step: 1 })
+  const a4 = appendSessionEvent(srcSession, 'assistant/message', {
+    turn: 4, step: 1,
+    message: { id: 'tavern-regen:edit4', role: 'assistant', content: text('重摇正文2'), source: { ...model, tavernStoryTurn: 2 } }
+  }, { surfaceOp: { op: 'replace', startSeq: a2.seq, endSeq: a3.seq }, sourceEventSeqs: [a2.seq, r3.seq, a3.seq] })
+  appendSessionEvent(srcSession, 'step/end', { turn: 4, step: 1 })
+  appendSessionEvent(srcSession, 'turn/end', { turn: 4, reason: { kind: 'completed' } })
+
+  // Turn 5 失败轮 + 清理占位
+  appendSessionEvent(srcSession, 'turn/start', { turn: 5 })
+  appendSessionEvent(srcSession, 'step/start', { turn: 5, step: 1 })
+  appendSessionEvent(srcSession, 'user/message', { id: 'u5-fail', role: 'user', content: text('失败输入5'), source: { kind: 'user', rpcId: 'rpc-5' } }, { surfaceOp: 'append' })
+  appendSessionEvent(srcSession, 'step/end', { turn: 5, step: 1 })
+  appendSessionEvent(srcSession, 'turn/end', { turn: 5, reason: { kind: 'error' } })
+  assert.equal(clearFailedTurnSurface({ session: srcSession, turn: 5 }), 1)
+
+  // Turn 6 & Turn 7
+  const play = (turn, userText, bodyText) => {
+    appendSessionEvent(srcSession, 'turn/start', { turn })
+    appendSessionEvent(srcSession, 'step/start', { turn, step: 1 })
+    const u = appendSessionEvent(srcSession, 'user/message', { id: 'u' + turn, role: 'user', content: text(userText), source: { kind: 'user', rpcId: 'rpc-' + turn } }, { surfaceOp: 'append' })
+    const a = appendSessionEvent(srcSession, 'assistant/message', { turn, step: 1, message: { id: 'a' + turn, role: 'assistant', content: text(bodyText), source: model } }, { surfaceOp: 'append' })
+    appendSessionEvent(srcSession, 'step/end', { turn, step: 1 })
+    appendSessionEvent(srcSession, 'turn/end', { turn, reason: { kind: 'completed' } })
+    return { u, a }
+  }
+  const r6 = play(6, '第6轮输入', '正文6')
+  const r7 = play(7, '第7轮输入', '正文7')
+
+  const srcChat = {
+    id: 'src-chat',
+    sessionId: srcSession.id,
+    mode: 'story',
+    cardPath: 'cards/fixture.json',
+    settleStatus: 'idle',
+    regeneratedDshTurns: { '2': 3 },
+    suppressedDshTurns: [3],
+    nativeCommits: { '2': { seq: a4.seq }, '6': { seq: r6.a.seq }, '7': { seq: r7.a.seq } },
+    messages: [
+      { role: 'assistant', turn: 1, greeting: true, text: '开场白' },
+      { role: 'user', text: '第2轮输入' },
+      { role: 'assistant', turn: 2, text: '重摇正文2', nativeAnchor: roundAnchor(2, u2, a2) },
+      { role: 'user', text: '第6轮输入' },
+      { role: 'assistant', turn: 6, text: '正文6', nativeAnchor: roundAnchor(6, r6.u, r6.a) },
+      { role: 'user', text: '第7轮输入' },
+      { role: 'assistant', turn: 7, text: '正文7', nativeAnchor: roundAnchor(7, r7.u, r7.a) }
+    ],
+    timeline: { schemaVersion: 1, branchId: 'b-src', revision: 1, checkpoints: [], participants: {}, operations: {}, updatedAt: 1 }
+  }
+
+  // 复制完整会话并恢复为带 inheritedEventCount 与 session/end-seed 的副本 Session。
+  const srcEvents = sessionEvents(srcSession)
+  const atSeq = srcEvents.at(-1).seq
+  const dupChat = forkConversationChat(srcChat, {
+    chatId: 'dup-chat',
+    sessionId: 'dup-session',
+    duplicate: true,
+    preserveNativeCommits: true,
+    preserveNativeSync: true,
+    lastNativeTurn: 7,
+    turn: 7,
+    atSeq,
+    title: '副本'
+  })
+  const dupEvents = [
+    ...structuredClone(srcEvents),
+    { seq: srcEvents.length, time: Date.now(), type: 'session/end-seed', data: { inherited: true } }
+  ]
+  const dupHeader = { ...srcSession.header, id: 'dup-session', isSeeded: true, parentSession: srcSession.id }
+  const dupSession = Session.fromRestore('dup-session', dupEvents, dupHeader, dupEvents.length, 'detached')
+
+  let current = structuredClone(dupChat)
+  const timeline = createStoryTimeline({ id: prefix => prefix + '-' + Math.random().toString(36).slice(2, 8) })
+  const history = createRoundHistory({
+    chats: {
+      read: async () => structuredClone(current),
+      forSession: async () => structuredClone(current),
+      readCard: async () => ({ name: '角色' }),
+      write: async value => { current = structuredClone(value); return structuredClone(current) },
+      update: async (_id, mutate) => { current = await mutate(structuredClone(current)) ?? current; return structuredClone(current) }
+    },
+    sessions: {
+      get: () => ({ session: dupSession, phase: { lastTurn: 7 } }),
+      getSession: () => dupSession,
+      flush: async () => {}
+    },
+    scripts: { continuity: { transition: () => ({ state: {} }) }, dispatchEvent: async () => {} },
+    timeline,
+    present: async value => structuredClone(value)
+  })
+
+  // 连续三次点击“回退本轮”：依次撤回第 7 轮、第 6 轮（跨第 5 轮失败清理占位）与重生成的第 2 轮。
+  await history.rollback('dup-session', 'dup-chat')
+  assert.deepEqual(current.messages.map(m => m.text), ['开场白', '第2轮输入', '重摇正文2', '第6轮输入', '正文6'])
+  assert.equal(rollbackAvailability(current, { events: sessionEvents(dupSession), nodes: dupSession.surface.nodes }).canRollback, true)
+
+  await history.rollback('dup-session', 'dup-chat')
+  assert.deepEqual(current.messages.map(m => m.text), ['开场白', '第2轮输入', '重摇正文2'])
+  const beforeClear5 = rollbackAvailability(current, { events: sessionEvents(dupSession), nodes: dupSession.surface.nodes })
+  assert.equal(beforeClear5.canRollback, true)
+  assert.deepEqual(beforeClear5.failedTurns, [5])
+
+  // 第 3 次回退暴露出先前第 5 轮未纳入 suppressedDshTurns 的失败清理尾并清理记录之，第 4 次回退紧接着成功撤回重生成后的第 2 轮。
+  await history.rollback('dup-session', 'dup-chat')
+  assert.ok(current.suppressedDshTurns.includes(5))
+  assert.deepEqual(current.messages.map(m => m.text), ['开场白', '第2轮输入', '重摇正文2'])
+
+  await history.rollback('dup-session', 'dup-chat')
+  assert.deepEqual(current.messages.map(m => m.text), ['开场白'])
+  assert.equal(rollbackAvailability(current, { events: sessionEvents(dupSession), nodes: dupSession.surface.nodes }).canRollback, false)
+
+  const reopened = Session.fromRestore('dup-session', sessionEvents(dupSession), dupSession.header, dupEvents.length, 'detached')
+  const deriveTexts = JSON.stringify(reopened.deriveMessages())
+  assert.match(deriveTexts, /开场白/)
+  assert.doesNotMatch(deriveTexts, /正文7|正文6|重摇正文2|失败输入5/)
+})
+

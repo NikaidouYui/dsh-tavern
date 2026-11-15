@@ -5,6 +5,7 @@ import { openTurnStep, sessionEvents } from './session-events.js'
 import { agentForSession } from './agent-lookup.js'
 import { createRoundAnchorResolver, validAnchor } from './round-anchor.js'
 import { isCompactionCheckpoint } from './compaction-checkpoint.js'
+import { isActiveTurnInputNode, isRollbackUserTombstone } from './rollback-surface.js'
 
 const body = message => String(message?.text ?? '')
 const EDIT_PREFIX = 'tavern-template-edit:'
@@ -21,8 +22,8 @@ function anchoredInputs(events, nodes) {
     resolve ??= createRoundAnchorResolver({ events, nodes: nodes.map(event => event.seq) })
     const resolved = resolve(anchor)
     const at = resolved && resolved.input !== null ? nodes.findIndex(event => event.seq === resolved.input) : -1
-    // A round inside compacted history resolves to the checkpoint: it has no own input left.
-    return at >= 0 && nodes[at].type === 'user/message' && !isCompactionCheckpoint(nodes[at]) ? at : -1
+    // 已进入摘要或已清理占位的轮次不再有可编辑的独立玩家输入。
+    return at >= 0 && isActiveTurnInputNode(nodes[at]) ? at : -1
   }
 }
 
@@ -130,7 +131,8 @@ export async function synchronizeTemplateHistory(session, chat, flush) {
     const edit = message?.templateHistoryEdit
     if (!edit || ids.has(edit.id) || !session.surface?.nodes.includes(edit.seq) || (edit.role === 'assistant' && !idle)) continue
     const target = events.find(event => event.seq === edit.seq)
-    if (isCompactionCheckpoint(target)) continue
+    if (!target || isCompactionCheckpoint(target) || isRollbackUserTombstone(target)) continue
+    if (edit.role === 'user' && !isActiveTurnInputNode(target)) continue
     const original = target.type === 'assistant/message' ? target.data.message : target.data
     let replaced = false
     const content = original.content.flatMap(block => {

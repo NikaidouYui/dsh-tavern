@@ -111,9 +111,9 @@
 				// uiWorkspace.connectWorkspace may reuse a blank Session that already has a
 				// Tavern opening and a locked preset. New conversations must have their own Session.
 				connectWorkspace: function (workspaceId) { return ctx.sessions.create({ workspaceId: workspaceId }); },
-				forkSession: function (sessionId, atSeq) {
+				forkSession: function (sessionId, atSeq, options) {
 					if (!ctx.sessions || typeof ctx.sessions.fork !== "function") throw new Error("当前 DSH 版本不支持原生分叉，请升级 DSH 后重试");
-					return ctx.sessions.fork({ sessionId: sessionId, atSeq: atSeq, increaseTitle: true });
+					return ctx.sessions.fork({ sessionId: sessionId, atSeq: atSeq, increaseTitle: !(options && options.increaseTitle === false) });
 				},
 				ensurePreset: async function (sessionId, request) {
 					// Select before writing the opening; the Session stream publishes preset state.

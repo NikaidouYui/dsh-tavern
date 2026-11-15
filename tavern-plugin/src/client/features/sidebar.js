@@ -1277,44 +1277,56 @@
 			async function forkConversation(item, currentTitle, turn, target) {
 				setMenuSession(null);
 				setBusy(true); setError("");
+				const duplicate = Boolean(target && target.duplicate);
+				const verb = duplicate ? "复制" : "分叉";
 				let targetSessionId = "";
 				let forkCreated = false;
 				try {
-					const direct = Number.isSafeInteger(target && target.messageIndex);
-					const plan = await call("prepareConversationFork", direct
-						? { chatId: item.chatId, sessionId: item.sessionId, messageIndex: target.messageIndex, revision: target.revision, messageUid: target.messageUid }
-						: { chatId: item.chatId, sessionId: item.sessionId, turn: Number(turn) || 0 });
+					const direct = !duplicate && Number.isSafeInteger(target && target.messageIndex);
+					const plan = await call("prepareConversationFork", duplicate
+						? { chatId: item.chatId, sessionId: item.sessionId, duplicate: true }
+						: direct
+							? { chatId: item.chatId, sessionId: item.sessionId, messageIndex: target.messageIndex, revision: target.revision, messageUid: target.messageUid }
+							: { chatId: item.chatId, sessionId: item.sessionId, turn: Number(turn) || 0 });
 					if (plan.storyDirect) {
 						const targetWorkspaceId = workspaceId || playWorkspaceIdRef.current || "";
 						if (!targetWorkspaceId) throw new Error("找不到可用的工作区");
 						targetSessionId = await props.conversationHost.connectWorkspace(targetWorkspaceId);
 						await ensureTavernPreset(targetSessionId, {});
-					} else targetSessionId = await props.conversationHost.forkSession(item.sessionId, plan.atSeq);
+					} else targetSessionId = await props.conversationHost.forkSession(item.sessionId, plan.atSeq, { increaseTitle: !duplicate });
 					await call("forkChat", {
 						chatId: item.chatId,
 						sessionId: item.sessionId,
 						targetSessionId: targetSessionId,
 						turn: plan.turn, sourceRevision: plan.sourceRevision, atSeq: plan.atSeq,
-						messageIndex: plan.messageIndex, messageUid: plan.messageUid
+						messageIndex: plan.messageIndex, messageUid: plan.messageUid,
+						duplicate: duplicate
 					});
 					forkCreated = true;
-					if (target && target.plotCompassPin) {
+					if (!duplicate && target && target.plotCompassPin) {
 						try { await call("pinPlotCompassRoute", Object.assign({ sessionId: targetSessionId }, target.plotCompassPin)); }
 						catch (pinError) { console.warn("dsh-tavern: 分叉已创建，但锚定剧情路线失败", pinError); }
 					}
-					const titleSuffix = target && typeof target.titleSuffix === "string" && target.titleSuffix ? target.titleSuffix : " · 分支";
+					const defaultSuffix = duplicate ? " · 副本" : " · 分支";
+					const titleSuffix = target && typeof target.titleSuffix === "string" && target.titleSuffix ? target.titleSuffix : defaultSuffix;
 					const forkTitle = (currentTitle || item.cardName + "的新对话") + titleSuffix;
 					try { await (isPlayMode(item.mode || "story") ? props.renameChat : props.renameSession)(targetSessionId, forkTitle); }
-					catch (renameError) { console.warn("dsh-tavern: 分叉已创建，但自动命名失败", renameError); }
+					catch (renameError) { console.warn("dsh-tavern: " + verb + "已创建，但自动命名失败", renameError); }
 					const pending = { sessionId: targetSessionId, targetMode: item.mode };
 					setPendingOpen(pending);
 					await finishPendingOpen(pending);
+					if (target && target.fromManager) {
+						closeHistoryManager();
+						if (narrowLayout() && typeof props.closeNarrowSidebar === "function") props.closeNarrowSidebar();
+					} else if (duplicate && narrowLayout() && typeof props.closeNarrowSidebar === "function") {
+						props.closeNarrowSidebar();
+					}
 				} catch (err) {
 					if (targetSessionId && !forkCreated) {
 						try { await props.archiveSession(targetSessionId); }
-						catch (archiveError) { if (!isMissingSessionArchiveError(archiveError)) console.warn("dsh-tavern: 清理分叉目标 Session 失败", archiveError); }
+						catch (archiveError) { if (!isMissingSessionArchiveError(archiveError)) console.warn("dsh-tavern: 清理" + verb + "目标 Session 失败", archiveError); }
 					}
-					setError("分叉对话失败：" + String(err && err.message || err));
+					setError(verb + "对话失败：" + String(err && err.message || err));
 				} finally { setBusy(false); }
 			}
 			React.useEffect(function () {
@@ -1439,6 +1451,7 @@
 						// 触屏没有悬停的 ▾，展开/收起预览收进菜单，行内不再多占一列。
 						preview.hasPreview ? h("button", { disabled: busy, "aria-pressed": expanded ? "true" : "false", onClick: function () { togglePreview(item); } }, expanded ? "收起预览" : "展开预览") : null,
 						!archived ? h("button", { disabled: busy, onClick: function () { renameConversation(item, title); } }, "重命名") : null,
+						isPlayMode(item.mode || "story") ? h("button", { disabled: busy, onClick: function () { void forkConversation(item, title, 0, { duplicate: true }); } }, "复制完整会话") : null,
 						h("button", { disabled: busy, onClick: () => changeConversationArchive(item, !archived) }, archived ? "恢复到历史" : "归档"),
                         !archived && isPlayMode(item.mode || "story") ? h("button", { disabled: busy, onClick: () => rescueConversation(item) }, "存档救援") : null,
                         !archived && isPlayMode(item.mode || "story") ? h("button", { disabled: busy, title: "存档打不开或迁移失败时，导出会话结构发给开发者；不含剧情正文", onClick: () => { setMenuSession(null); downloadSessionDiagnostics({ chatId: item.chatId }).catch(err => setError("导出诊断文件失败：" + String(err.message || err))); } }, "导出诊断文件") : null,
@@ -1545,9 +1558,14 @@
 						preview.hasPreview ? previewLinesNode(preview.detailLines, false, "dsh-tavern-history-manager-preview") : h("div", { className: "dsh-tavern-history-manager-preview empty" }, "还没有正文内容")),
 					h("div", { className: "dsh-tavern-history-manager-actions" },
 						h("button", { disabled: busy, onClick: function () { void openManagerSession(item); } }, "打开"),
+						play ? h("button", { disabled: busy, title: "复制完整会话（保留思维链与完整历史上下文）", onClick: function () { void forkConversation(item, title, 0, { duplicate: true, fromManager: true }); } }, "复制") : null,
 						h("button", { disabled: busy, onClick: function () { void changeConversationArchive(item, !archived); } }, archived ? "恢复" : "归档"),
 						h("button", { className: "danger", disabled: busy, onClick: function () { void deleteConversation(item, title); } }, "删除")));
 			}
+			const pickerError = error ? h("div", { className: "dsh-tavern-picker-error", role: "alert" },
+				h("div", null, error),
+				pendingOpen ? h("button", { className: "dsh-tavern-btn", disabled: busy, style: { marginTop: "8px" }, onClick: retryPendingOpen }, "重新连接已创建的 Session") : null
+			) : null;
 			const historyManagerPanel = historyManagerOpen ? h("div", { key: "history-manager", className: "dsh-tavern-picker-overlay dsh-tavern-history-manager-overlay", onMouseDown: function (event) { if (event.target === event.currentTarget) closeHistoryManager(); } },
 				h("div", { className: "dsh-tavern-history-manager", role: "dialog", "aria-modal": "true", "aria-label": "会话管理" },
 					h("div", { className: "dsh-tavern-history-manager-head" },
@@ -1574,12 +1592,9 @@
 						h("button", { className: "dsh-tavern-btn", disabled: busy || !managerSelectedActive, onClick: function () { void archiveSelectedConversations(true, managerPool); } }, "归档所选" + (managerSelectedActive ? "（" + managerSelectedActive + "）" : "")),
 						h("button", { className: "dsh-tavern-btn", disabled: busy || !managerSelectedArchived, onClick: function () { void archiveSelectedConversations(false, managerPool); } }, "恢复所选" + (managerSelectedArchived ? "（" + managerSelectedArchived + "）" : "")),
 						h("button", { className: "dsh-tavern-btn danger", disabled: busy || !managerSelectedItems.length, onClick: function () { void deleteSelectedConversations(managerPool); } }, busy ? "处理中…" : "彻底删除" + (managerSelectedItems.length ? "（" + managerSelectedItems.length + "）" : ""))),
-					deleteNotice ? h("div", { className: "dsh-tavern-history-manager-notice", role: "status" }, deleteNotice) : null)) : null;
+					deleteNotice ? h("div", { className: "dsh-tavern-history-manager-notice", role: "status" }, deleteNotice) : null,
+					pickerError)) : null;
 			const selectedOpening = openingPicker && openingPicker.openings[openingPicker.index];
-			const pickerError = error ? h("div", { className: "dsh-tavern-picker-error", role: "alert" },
-				h("div", null, error),
-				pendingOpen ? h("button", { className: "dsh-tavern-btn", disabled: busy, style: { marginTop: "8px" }, onClick: retryPendingOpen }, "重新连接已创建的 Session") : null
-			) : null;
 			const cardImportNotice = cardImportStatus ? h("div", { className: "dsh-tavern-question-sub dsh-tavern-card-import-hint",
 				role: "status", style: { whiteSpace: "pre-line", overflowWrap: "anywhere" } }, cardImportStatus) : null;
 			const importChoice = chatImport && openingPicker && chatImport.cardPath === openingPicker.card.path ? h(React.Fragment, null,

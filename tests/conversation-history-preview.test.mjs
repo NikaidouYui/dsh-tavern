@@ -196,12 +196,14 @@ test('行内预览分紧凑与展开两份，仅开场单独标注', () => {
   assert.equal(opening.compactLines[0].label, '开场')
 })
 
-test('侧边栏行渲染预览、轮数与展开开关，并挂上宽屏管理面板', () => {
+test('侧边栏行渲染预览、轮数与展开开关，并挂上宽屏管理面板与复制入口', () => {
   assert.match(sidebar, /dsh-tavern-side-row-preview/)
   assert.match(sidebar, /dsh-tavern-side-row-expand/)
   assert.match(sidebar, /preview\.turnBadge/)
   assert.match(sidebar, /call\("loadSessionPreviews"/)
   assert.match(sidebar, /dsh-tavern-history-manager/)
+  assert.match(sidebar, /isPlayMode\(item\.mode \|\| "story"\) \? h\("button", \{ disabled: busy, onClick: function \(\) \{ void forkConversation\(item, title, 0, \{ duplicate: true \}\); \} \}, "复制完整会话"\)/)
+  assert.match(sidebar, /play \? h\("button", \{ disabled: busy, title: "复制完整会话（保留思维链与完整历史上下文）", onClick: function \(\) \{ void forkConversation\(item, title, 0, \{ duplicate: true, fromManager: true \}\); \} \}, "复制"\)/)
   assert.match(css, /\.dsh-tavern-side-row-preview \{/)
   assert.match(css, /\.dsh-tavern-history-manager \{/)
 })

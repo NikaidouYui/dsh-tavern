@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { conversationStateAtMessage, conversationStateAtTurn, conversationForkBoundary } from '../tavern-plugin/lib/domain/conversation-fork-point.js'
+import { conversationStateAtMessage, conversationStateAtTurn, conversationForkBoundary, conversationDuplicateBoundary } from '../tavern-plugin/lib/domain/conversation-fork-point.js'
 
 // A story Chat whose snapshots are keyed by revision, exactly like storage: here
 // revision == message count and each round contributes one checkpoint.
@@ -102,4 +102,47 @@ test('原生分叉边界按所选回合确定，不把后续模型历史带入',
   assert.equal(conversationForkBoundary(session, {}, 2), 5)
   assert.equal(conversationForkBoundary(session, {}, 3), 8)
   assert.throws(() => conversationForkBoundary(session, {}, 4), /边界/)
+})
+
+test('conversationDuplicateBoundary 兼容末尾独立事件、纯前缀与开放回合截断', () => {
+  assert.equal(conversationDuplicateBoundary({ events: [] }), null)
+
+  // 回合完成后附带独立配置/模型切换事件，以及后续未闭合的 turn/start：停在 barrier 之前。
+  const withTrailingAndOpen = {
+    events: [
+      { seq: 0, type: 'session/init', data: {} },
+      { seq: 1, type: 'turn/start', data: { turn: 1 } },
+      { seq: 2, type: 'assistant/message', data: { turn: 1, message: { id: 'a1' } } },
+      { seq: 3, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+      { seq: 4, type: 'session/model', data: { model: 'deepseek-reasoner' } },
+      { seq: 5, type: 'turn/start', data: { turn: 2 } },
+      { seq: 6, type: 'assistant/message', data: { turn: 2, message: { id: 'a2' } } }
+    ]
+  }
+  assert.equal(conversationDuplicateBoundary(withTrailingAndOpen), 4)
+
+  // 尾部紧跟排队 user/message(append) 或 agent/inbox/spliced 时同样不能带入。
+  const withQueuedUser = {
+    events: [
+      { seq: 0, type: 'turn/start', data: { turn: 1 } },
+      { seq: 1, type: 'turn/end', data: { turn: 1, reason: { kind: 'cancelled' } } },
+      { seq: 2, type: 'session/note', data: {} },
+      { seq: 3, type: 'user/message', data: { mode: 'append', content: [{ type: 'text', text: '排队输入' }] } }
+    ]
+  }
+  assert.equal(conversationDuplicateBoundary(withQueuedUser), 2)
+
+  // 无任何 turn/end 但已有初始化前缀时，保留到开放回合前的最后一个前缀事件。
+  const prefixOnly = {
+    events: [
+      { seq: 0, type: 'session/init', data: {} },
+      { seq: 1, type: 'system/prompt', data: {} },
+      { seq: 2, type: 'turn/start', data: { turn: 1 } }
+    ]
+  }
+  assert.equal(conversationDuplicateBoundary(prefixOnly), 1)
+
+  // 完全从 seq 0 开始且尚无完成回合与独立前缀，或 seq 不对齐，回退 null。
+  assert.equal(conversationDuplicateBoundary({ events: [{ seq: 0, type: 'turn/start', data: { turn: 1 } }] }), null)
+  assert.equal(conversationDuplicateBoundary({ events: [{ seq: 9, type: 'session/init', data: {} }] }), null)
 })

@@ -46,12 +46,27 @@ export function createConversationHandlers(deps) {
       return await deleteChat(args && args.chatId)
     },
     async prepareConversationFork(args) {
-      const plan = await prepareConversationFork(args?.chatId, args?.sessionId, args?.turn, args?.messageIndex, args?.revision, args?.messageUid)
-      return { turn: plan.turn, atSeq: plan.atSeq, sourceRevision: plan.source._storageRevision,
-        messageIndex: plan.messageIndex, messageUid: plan.messageUid, storyDirect: plan.storyDirect === true }
+      const plan = await prepareConversationFork(
+        args?.chatId, args?.sessionId, args?.turn, args?.messageIndex, args?.revision, args?.messageUid,
+        { duplicate: args?.duplicate === true }
+      )
+      return {
+        turn: plan.turn,
+        atSeq: plan.atSeq,
+        sourceRevision: plan.source._storageRevision,
+        messageIndex: plan.messageIndex,
+        messageUid: plan.messageUid,
+        storyDirect: plan.storyDirect === true,
+        duplicate: plan.duplicate === true
+      }
     },
     async forkChat(args) {
-      return { fork: await forkChat(args?.chatId, args?.sessionId, args?.targetSessionId, args?.turn, args?.sourceRevision, args?.atSeq, args?.messageIndex, args?.messageUid) }
+      return {
+        fork: await forkChat(
+          args?.chatId, args?.sessionId, args?.targetSessionId, args?.turn, args?.sourceRevision, args?.atSeq, args?.messageIndex, args?.messageUid,
+          { duplicate: args?.duplicate === true }
+        )
+      }
     },
     async getSessionInventory(args) {
       return await sessionInventory.read()

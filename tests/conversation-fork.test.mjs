@@ -67,3 +67,58 @@ test('分叉来源带着故事消息序号，原生轮号分叉不带', async ()
   const native = forkConversationChat(sourceChat(), { chatId: 'chat-native', sessionId: 'session-native', id: prefix => prefix + '-x', lastNativeTurn: 2 })
   assert.equal(native.forkedFrom.messageIndex, undefined)
 })
+
+test('复制完整会话保留有效原生提交映射、同步标记与副本溯源，并清理独占后台/撤销字段', async () => {
+  const { forkConversationChat, assertConversationForkable } = await import('../tavern-plugin/lib/domain/conversation-fork.js')
+  const source = {
+    ...sourceChat(),
+    rollbackUndo: { version: 1, id: 'undo-1', turn: 2 },
+    backgroundSessionId: 'bg-source',
+    backgroundHistoryIds: ['bg-hist-1'],
+    importHistory: { version: 1, operationId: 'op-import-1' },
+    backgroundTasks: [{ id: 'task-1' }],
+    nativeOpeningAppended: true,
+    nativeSync: { status: 'synced', at: 100 },
+    nativeCommits: {
+      1: { turn: 1, operationId: 'op-1' },
+      2: { turn: 2, operationId: 'op-2' },
+      3: { turn: 3, operationId: 'op-stale' }
+    }
+  }
+  const duplicated = forkConversationChat(source, {
+    chatId: 'chat-dup',
+    sessionId: 'session-dup',
+    id: prefix => prefix + '-dup',
+    lastNativeTurn: 2,
+    duplicate: true,
+    preserveNativeCommits: true,
+    preserveNativeSync: true,
+    turn: 2,
+    atSeq: 19
+  })
+  assert.deepEqual(duplicated.nativeCommits, {
+    1: { turn: 1, operationId: 'op-1' },
+    2: { turn: 2, operationId: 'op-2' }
+  })
+  assert.equal(duplicated.nativeOpeningAppended, true)
+  assert.deepEqual(duplicated.nativeSync, { status: 'synced', at: 100 })
+  assert.equal(duplicated.forkedFrom.kind, 'duplicate')
+  assert.equal(duplicated.forkedFrom.turn, 2)
+  assert.equal(duplicated.forkedFrom.atSeq, 19)
+  assert.equal(duplicated.rollbackUndo, undefined)
+  assert.equal(duplicated.backgroundSessionId, undefined)
+  assert.equal(duplicated.backgroundHistoryIds, undefined)
+  assert.equal(duplicated.importHistory, undefined)
+  assert.equal(duplicated.backgroundTasks, undefined)
+
+  // 原有分支同样不得继承源会话的后台、导入与撤销所有权。
+  const partialFork = forkConversationChat(source, { chatId: 'chat-part', sessionId: 'session-part', id: prefix => prefix + '-part', lastNativeTurn: 2 })
+  assert.deepEqual(partialFork.nativeCommits, {})
+  assert.equal(partialFork.rollbackUndo, undefined)
+  assert.equal(partialFork.backgroundSessionId, undefined)
+  assert.equal(partialFork.forkedFrom.kind, undefined)
+
+  // assertConversationForkable 在 duplicate: true 下给出「复制」语义报错且禁止未产生正文状态。
+  assert.throws(() => assertConversationForkable({ mode: 'story', regenInProgress: true, messages: [] }, { duplicate: true }), /再复制/)
+  assert.throws(() => assertConversationForkable({ mode: 'story', messages: [{ role: 'user', text: 'hi' }] }, { duplicate: true }), /不能复制/)
+})

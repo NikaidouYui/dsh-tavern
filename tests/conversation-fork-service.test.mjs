@@ -310,6 +310,82 @@ async function runServiceFixture() {
     assert.equal((await forkOf('session-e-fork')).messageIndex, 4)
     assert.equal((await forkOf('session-e-fork')).atSeq, null)
     evidence.editedTurnFallback = { messageIndex: editedPlan.messageIndex, messageCount: editedFork.fork.messageCount }
+
+    // ---- 复制完整会话路径：保留思维链/工具事件、末尾独立事件与 session/end-seed 校验、并发拦截及空日志回退 ----
+    const dupRows = [row('assistant', '开场序幕', 0), row('user', '观察密室'), row('assistant', '发现机关', 1)]
+    const dupSource = await importGame({
+      id: 'source-f', sessionId: 'session-f', messages: dupRows,
+      rounds: [{ user: '观察密室', assistant: '发现机关' }]
+    })
+    const dupSourceEvents = [
+      { seq: 0, type: 'session/init', data: { agentPreset: 'tavern' } },
+      { seq: 1, type: 'turn/start', data: { turn: 1 } },
+      { seq: 2, type: 'step/start', data: { turn: 1, step: 1 } },
+      { seq: 3, type: 'user/message', data: { id: 'u1', role: 'user', content: text('观察密室'), source: { kind: 'user' } } },
+      { seq: 4, type: 'assistant/message', data: { turn: 1, step: 1, message: { id: 'a1-think', role: 'assistant',
+        content: [{ type: 'thinking', thinking: '角色推理与思维链' }],
+        tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'inspect_room', arguments: '{}' } }],
+        source: { kind: 'model' } } } },
+      { seq: 5, type: 'tool/result', data: { turn: 1, step: 1, toolCallId: 'tc1', content: text('门锁着') } },
+      { seq: 6, type: 'assistant/message', data: { turn: 1, step: 2, message: { id: 'a1-body', role: 'assistant',
+        content: text('发现机关'), source: { kind: 'model' } } } },
+      { seq: 7, type: 'step/end', data: { turn: 1, step: 2 } },
+      { seq: 8, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+      { seq: 9, type: 'session/model', data: { model: 'deepseek-reasoner' } }
+    ]
+    sessions.set(dupSource.sessionId, { header: { id: dupSource.sessionId }, events: dupSourceEvents })
+    const dupPlan = await host.rpc('prepareConversationFork', { chatId: dupSource.chatId, sessionId: dupSource.sessionId, duplicate: true })
+    assert.equal(dupPlan.duplicate, true)
+    assert.equal(dupPlan.storyDirect, false)
+    assert.equal(dupPlan.atSeq, 9, '完整复制边界包含 turn/end 之后的独立会话事件')
+
+    // 拦截额外对话事件或边界未对齐的篡改目标。
+    sessions.set('session-f-extra', {
+      header: { id: 'session-f-extra' },
+      events: [...dupSourceEvents, { seq: 10, type: 'turn/start', data: { turn: 2 } }]
+    })
+    assert.match(await failureOf(host.rpc('forkChat', {
+      chatId: dupSource.chatId, sessionId: dupSource.sessionId, targetSessionId: 'session-f-extra',
+      turn: dupPlan.turn, sourceRevision: dupPlan.sourceRevision, atSeq: dupPlan.atSeq, duplicate: true
+    })), /原生复制目标包含额外对话事件/)
+
+    // 模拟宿主 ctx.sessions.fork 追加 session/end-seed 后的真实产物。
+    const forkedNativeEvents = [
+      ...dupSourceEvents.slice(0, dupPlan.atSeq + 1),
+      { seq: dupPlan.atSeq + 1, type: 'session/end-seed', data: { inherited: true } }
+    ]
+    sessions.set('session-f-dup', { header: { id: 'session-f-dup' }, events: forkedNativeEvents })
+    const dupResult = await host.rpc('forkChat', {
+      chatId: dupSource.chatId, sessionId: dupSource.sessionId, targetSessionId: 'session-f-dup',
+      turn: dupPlan.turn, sourceRevision: dupPlan.sourceRevision, atSeq: dupPlan.atSeq, duplicate: true
+    })
+    assert.equal(dupResult.fork.messageCount, 3)
+    assert.deepEqual(await transcriptRows('session-f-dup'), await transcriptRows(dupSource.sessionId))
+    const dupChat = await chatOf('session-f-dup')
+    assert.equal(dupChat.forkedFrom.kind, 'duplicate')
+    assert.equal(dupChat.forkedFrom.atSeq, 9)
+    assert.equal(sessions.get('session-f-dup').events[4].data.message.content[0].thinking, '角色推理与思维链')
+    assert.equal(sessions.get('session-f-dup').events[5].type, 'tool/result')
+
+    // 并发 fence 检查：atSeq 变化必须拦截。
+    assert.match(await failureOf(host.rpc('forkChat', {
+      chatId: dupSource.chatId, sessionId: dupSource.sessionId, targetSessionId: blankSession('session-f-stale'),
+      turn: dupPlan.turn, sourceRevision: dupPlan.sourceRevision, atSeq: dupPlan.atSeq - 1, duplicate: true
+    })), /请重新复制会话/)
+
+    // 源原生事件完全为空时自动回退空白目标 + 原生修复，不阻断复制。
+    sessions.set(dupSource.sessionId, { header: { id: dupSource.sessionId }, events: [] })
+    const fallbackPlan = await host.rpc('prepareConversationFork', { chatId: dupSource.chatId, sessionId: dupSource.sessionId, duplicate: true })
+    assert.equal(fallbackPlan.duplicate, true)
+    assert.equal(fallbackPlan.storyDirect, true)
+    assert.equal(fallbackPlan.atSeq, null)
+    const fallbackDup = await host.rpc('forkChat', {
+      chatId: dupSource.chatId, sessionId: dupSource.sessionId, targetSessionId: blankSession('session-f-fallback'),
+      turn: fallbackPlan.turn, sourceRevision: fallbackPlan.sourceRevision, atSeq: null, duplicate: true
+    })
+    assert.equal(fallbackDup.fork.messageCount, 3)
+    assert.equal((await forkOf('session-f-fallback')).kind, 'duplicate')
+    evidence.duplicate = { atSeq: dupPlan.atSeq, duplicatedCount: dupResult.fork.messageCount, fallbackDirect: fallbackPlan.storyDirect }
   } finally { await host.dispose() }
   return evidence
 }

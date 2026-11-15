@@ -246,3 +246,35 @@ export function conversationForkBoundary(session, state, turn) {
   if (!result || (following && result.event.seq >= following.seq)) throw boundaryError(FORK_BOUNDARY_UNSAFE, '该回合正文曾在后续上下文中修改，无法按旧边界安全分叉')
   return end.seq
 }
+
+// 复制完整会话的原生边界：优先定位最后一个 turn/end，再向后推进独立的会话级尾部事件；
+// 若没有任何 turn/end，则保留未进入开放回合前的前缀事件，避免复制半截运行中回合。
+export function conversationDuplicateBoundary(session) {
+  const events = sessionEvents(session)
+  if (!events.length) return null
+
+  const isBarrierEvent = event => {
+    const type = event?.type
+    if (type === 'turn/start' || type === 'agent/inbox/spliced') return true
+    if (type === 'user/message') return !event.data?.mode || event.data.mode === 'append'
+    return false
+  }
+
+  let boundary = events.findLastIndex(event => event?.type === 'turn/end')
+  if (boundary >= 0) {
+    if (events[boundary]?.seq !== boundary) return null
+    for (let i = boundary + 1; i < events.length; i += 1) {
+      const event = events[i]
+      if (!event || event.seq !== i || isBarrierEvent(event)) break
+      boundary = i
+    }
+    return boundary
+  }
+
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i]
+    if (!event || event.seq !== i || isBarrierEvent(event)) break
+    boundary = i
+  }
+  return boundary >= 0 ? boundary : null
+}

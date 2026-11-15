@@ -122,7 +122,7 @@ import { createServerTemplateRuntime } from './domain/server-template-runtime.js
 import { createForegroundStyleReferenceTool, foregroundStyleReferencePrompt, rememberStyleReference } from './domain/style-reference.js'
 import { adoptConversationFeatures, adoptConversationBackground } from './domain/conversation-background.js'
 import { clearLegacyTavernDefault } from './domain/legacy-agent-default.js'
-import { conversationStateAtMessage, conversationStateAtTurn, conversationForkBoundary, FORK_BOUNDARY_MISSING, FORK_BOUNDARY_UNSAFE } from './domain/conversation-fork-point.js'
+import { conversationStateAtMessage, conversationStateAtTurn, conversationForkBoundary, conversationDuplicateBoundary, FORK_BOUNDARY_MISSING, FORK_BOUNDARY_UNSAFE } from './domain/conversation-fork-point.js'
 import { legacyMessageUid } from './domain/message-uid.js'
 import { createCardResponseTest } from './domain/card-response-test.js'
 import { createGameplayApi } from './gameplay-api.js'
@@ -2552,10 +2552,51 @@ export async function apply(ctx) {
     await updateChat(chat.id, current => { current.messages = [...(current.messages || []), ...appended.messages]; return current }, { source: 'test.append-rounds' })
     return { appended: rounds.length, lastTurn: appended.lastTurn }
   }
-  async function prepareConversationFork(sourceChatId, sourceSessionId, requestedTurn, requestedMessageIndex, requestedRevision, requestedMessageUid) {
+  function upgradeMappedReferences(state, events) {
+    const references = upgradeReferences(events)
+    const mapped = structuredClone(state)
+    for (const message of mapped.messages || []) {
+      if (message.nativeAnchor) message.nativeAnchor = upgradedAnchor(message.nativeAnchor, references)
+      if (message.bodyEdit) message.bodyEdit = { ...message.bodyEdit, seq: references.sequence(message.bodyEdit.seq, message.bodyEdit.formatVersion), formatVersion: 4 }
+    }
+    return mapped
+  }
+
+  function assertDuplicateForkTarget(target, atSeq) {
+    const events = sessionEvents(target)
+    const boundaryEvent = events[atSeq]
+    if (!boundaryEvent || boundaryEvent.seq !== atSeq) {
+      throw new Error('原生复制没有停在指定边界，已拒绝绑定游戏状态')
+    }
+    const validTrailing = events.slice(atSeq + 1).every(event =>
+      event?.type === 'session/end-seed' ||
+      (event?.type === 'turn/end' && event?.data?.reason?.kind === 'forked')
+    )
+    if (!validTrailing) {
+      throw new Error('原生复制目标包含额外对话事件，已拒绝绑定游戏状态')
+    }
+  }
+
+  async function prepareConversationFork(sourceChatId, sourceSessionId, requestedTurn, requestedMessageIndex, requestedRevision, requestedMessageUid, options = {}) {
+    const duplicate = options?.duplicate === true
     const source = str(sourceChatId) === '' ? await chatForSession(str(sourceSessionId)) : await readChat(str(sourceChatId))
-    if (!source) throw new Error('找不到要分叉的源对话')
-    assertConversationForkable(source, { agentRunning: agentRegistry.get(source.sessionId)?.phase?.kind === 'running' })
+    if (!source) throw new Error(duplicate ? '找不到要复制的源对话' : '找不到要分叉的源对话')
+    assertConversationForkable(source, { agentRunning: agentRegistry.get(source.sessionId)?.phase?.kind === 'running', duplicate })
+    if (duplicate) {
+      let turn = 0
+      for (const message of source.messages || []) {
+        const messageTurn = Number(message?.turn)
+        if (Number.isSafeInteger(messageTurn) && messageTurn > turn) turn = messageTurn
+      }
+      return withHostSession({ sessions: sessionStore, agents: agentRegistry }, source.sessionId, session => {
+        const events = sessionEvents(session)
+        const atSeq = conversationDuplicateBoundary(session)
+        if (atSeq === null) {
+          return { source, state: source, turn, atSeq: null, storyDirect: true, duplicate: true }
+        }
+        return { source, state: upgradeMappedReferences(source, events), turn, atSeq, storyDirect: false, duplicate: true }
+      })
+    }
     if (requestedMessageIndex !== undefined && requestedMessageIndex !== null) {
       if (!Number.isSafeInteger(requestedMessageIndex) || requestedMessageIndex < 0) throw new Error('分叉消息位置无效')
       const messageUid = requestedMessageUid === undefined || requestedMessageUid === null ? '' : str(requestedMessageUid)
@@ -2576,12 +2617,7 @@ export async function apply(ctx) {
     }
     const { state, turn, messageIndex } = await conversationStateAtTurn(source, requestedTurn, readChatRevision)
     return withHostSession({ sessions: sessionStore, agents: agentRegistry }, source.sessionId, session => {
-      const references = upgradeReferences(sessionEvents(session))
-      const mapped = structuredClone(state)
-      for (const message of mapped.messages || []) {
-        if (message.nativeAnchor) message.nativeAnchor = upgradedAnchor(message.nativeAnchor, references)
-        if (message.bodyEdit) message.bodyEdit = { ...message.bodyEdit, seq: references.sequence(message.bodyEdit.seq, message.bodyEdit.formatVersion), formatVersion: 4 }
-      }
+      const mapped = upgradeMappedReferences(state, sessionEvents(session))
       // A turn whose body was rewritten after its own turn/end (an edit, a polish
       // write-back, a rescued stream) no longer has a native boundary that carries that
       // text. A story fork rebuilds native context from the message prefix, so take that
@@ -2615,22 +2651,29 @@ export async function apply(ctx) {
     } catch (error) { console.warn('dsh-tavern: 分叉时处理插件数据失败:', str(error?.message || error)) }
   }
 
-  async function forkChat(sourceChatId, sourceSessionId, targetSessionId, requestedTurn, expectedRevision, expectedAtSeq, requestedMessageIndex, requestedMessageUid) {
-    const { source, state, turn, atSeq, messageIndex, storyDirect, messageUid } = await prepareConversationFork(sourceChatId, sourceSessionId, requestedTurn, requestedMessageIndex, expectedRevision, requestedMessageUid)
+  async function forkChat(sourceChatId, sourceSessionId, targetSessionId, requestedTurn, expectedRevision, expectedAtSeq, requestedMessageIndex, requestedMessageUid, options = {}) {
+    const duplicate = options?.duplicate === true
+    const { source, state, turn, atSeq, messageIndex, storyDirect, messageUid } = await prepareConversationFork(
+      sourceChatId, sourceSessionId, requestedTurn, requestedMessageIndex, expectedRevision, requestedMessageUid, { duplicate }
+    )
     // Stable story identity covers unrelated writes between prepare and execute.
     // Legacy story requests and native atSeq forks retain their original fences.
     const sourceChanged = !(storyDirect && messageUid) && expectedRevision !== source._storageRevision
-    if (sourceChanged || (!storyDirect && expectedAtSeq !== atSeq)) throw new Error('源对话已变化，请重新选择分叉位置')
+    if (sourceChanged || (!storyDirect && expectedAtSeq !== atSeq)) {
+      throw new Error(duplicate ? '源对话已变化，请重新复制会话' : '源对话已变化，请重新选择分叉位置')
+    }
+    const verb = duplicate ? '复制' : '分叉'
     const targetId = str(targetSessionId)
-    if (targetId === '') throw new Error('分叉目标必须是尚未绑定对话的新 Session')
+    if (targetId === '') throw new Error(verb + '目标必须是尚未绑定对话的新 Session')
     return await serializeSessionLifecycle(targetId, async () => {
-      if (await chatForSession(targetId) !== undefined) throw new Error('分叉目标必须是尚未绑定对话的新 Session')
+      if (await chatForSession(targetId) !== undefined) throw new Error(verb + '目标必须是尚未绑定对话的新 Session')
       let targetHandle
       let target = sessionStore.get(targetId) || agentRegistry.get(targetId)?.session
       try {
         if (!target) { targetHandle = await agentRegistry.resume({ resumeSessionId: targetId }); target = targetHandle.agent.session }
-        if (!target) throw new Error('分叉目标原生会话尚未就绪')
+        if (!target) throw new Error(verb + '目标原生会话尚未就绪')
         if (storyDirect) assertBlankStoryForkTarget(targetId, target)
+        else if (duplicate) assertDuplicateForkTarget(target, atSeq)
         else {
           const targetEnd = sessionEvents(target).findLast(event => event.type === 'turn/end')
           if (!targetEnd || targetEnd.seq !== atSeq) throw new Error('原生分叉没有停在指定回合，已拒绝绑定游戏状态')
@@ -2638,33 +2681,53 @@ export async function apply(ctx) {
         const lastNativeTurn = storyDirect ? 0 : Number(sessionEvents(target).findLast(event => event.type === 'turn/start')?.data?.turn) || 0
         const includedTurns = new Set((state.messages || []).filter(message => message?.role === 'assistant')
           .map(message => Number(message.turn)).filter(turn => Number.isSafeInteger(turn) && turn >= 0))
-        const fork = forkConversationChat(state, { chatId: uid('chat'), sessionId: targetId, id: uid, now: Date.now, lastNativeTurn })
-        fork.forkedFrom = { ...fork.forkedFrom, chatId: source.id, sessionId: source.sessionId, storageRevision: source._storageRevision,
-          stateChatId: state.id, stateRevision: state._storageRevision, turn, ...(storyDirect ? { messageIndex, atSeq: null } : { atSeq }) }
+        const fork = forkConversationChat(state, {
+          chatId: uid('chat'),
+          sessionId: targetId,
+          id: uid,
+          now: Date.now,
+          lastNativeTurn,
+          duplicate,
+          preserveNativeCommits: duplicate && !storyDirect,
+          preserveNativeSync: duplicate && !storyDirect,
+          turn,
+          atSeq: storyDirect ? undefined : atSeq
+        })
+        fork.forkedFrom = {
+          ...fork.forkedFrom,
+          chatId: source.id,
+          sessionId: source.sessionId,
+          storageRevision: source._storageRevision,
+          stateChatId: state.id,
+          stateRevision: state._storageRevision,
+          turn,
+          ...(duplicate ? { kind: 'duplicate' } : {}),
+          ...(storyDirect ? { ...(messageIndex !== undefined ? { messageIndex } : {}), atSeq: null } : { atSeq })
+        }
         if (storyDirect) {
-          fork.nativeSync = { status: 'stale', reason: '故事分叉等待原生上下文同步', at: Date.now() }
+          fork.nativeSync = { status: 'stale', reason: duplicate ? '完整复制等待原生上下文同步' : '故事分叉等待原生上下文同步', at: Date.now() }
           // Do not suppress opening recovery until the native prefix really exists.
           fork.nativeOpeningAppended = false
         }
         await conversationRegistry.publish(fork, storyDirect ? {
           assertUnboundSession: () => assertBlankStoryForkTarget(targetId, target)
         } : undefined)
-        await saveMaintenance.recordFork(fork).catch(error => console.warn('dsh-tavern: 记录分叉来源失败', str(error?.message || error)))
+        await saveMaintenance.recordFork(fork).catch(error => console.warn('dsh-tavern: 记录' + verb + '来源失败', str(error?.message || error)))
         await sceneWorldbookArchive.copyRefs(state.id, fork.id, includedTurns).catch(() => {})
         await forkPluginState(source, state, fork, turn, includedTurns)
         if (storyDirect) {
-          const repaired = await seedNativeStory(targetId, target, '故事分叉后按消息历史建立原生上下文')
-            .catch(error => { console.warn('dsh-tavern: 故事分叉原生上下文修复失败:', str(error?.message || error)); return null })
+          const repaired = await seedNativeStory(targetId, target, duplicate ? '完整复制后按消息历史建立原生上下文' : '故事分叉后按消息历史建立原生上下文')
+            .catch(error => { console.warn('dsh-tavern: ' + (duplicate ? '完整复制' : '故事分叉') + '原生上下文修复失败:', str(error?.message || error)); return null })
           if (repaired && (repaired.applied || repaired.prefixed)) {
             fork.nativeOpeningAppended = true
-            await updateChatHeader(fork.id, ['nativeOpeningAppended'], () => ({ nativeOpeningAppended: true }), { source: 'conversation.story-fork-native-ready' })
-              .catch(error => console.warn('dsh-tavern: 保存故事分叉开场白状态失败:', str(error?.message || error)))
+            await updateChatHeader(fork.id, ['nativeOpeningAppended'], () => ({ nativeOpeningAppended: true }), { source: duplicate ? 'conversation.duplicate-native-ready' : 'conversation.story-fork-native-ready' })
+              .catch(error => console.warn('dsh-tavern: 保存' + (duplicate ? '完整复制' : '故事分叉') + '开场白状态失败:', str(error?.message || error)))
           }
         }
         const receiptTurn = turn > 0 ? turn : Math.max(0, ...includedTurns)
         return conversationForkReceipt(fork, { lastTurn: receiptTurn, messageCount: fork.messages.length })
       } finally {
-        if (targetHandle) await targetHandle.dispose().catch(error => console.warn('dsh-tavern: 释放分叉目标 Session 句柄失败:', str(error?.message || error)))
+        if (targetHandle) await targetHandle.dispose().catch(error => console.warn('dsh-tavern: 释放' + verb + '目标 Session 句柄失败:', str(error?.message || error)))
       }
     })
   }

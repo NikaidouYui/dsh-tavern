@@ -12,6 +12,12 @@ function object(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
 
+function nonNegativeInt(value) {
+  if (value === undefined || value === null || value === '') return undefined
+  const num = Number(value)
+  return Number.isSafeInteger(num) && num >= 0 ? num : undefined
+}
+
 function transientForkError(message) {
   const error = new Error(message)
   // Historical fork lookup may continue to a later snapshot in the same bounded
@@ -47,21 +53,33 @@ export function forkConversationChat(source, options = {}) {
   delete chat.regenRecovery
   delete chat.regenInProgress
   delete chat.failedRegenerationTarget
+  // 分支或完整副本都不继承源会话的回滚撤销点、后台会话与导入记录所有权，防止联动或删除时误伤源会话。
+  delete chat.rollbackUndo
+  delete chat.backgroundSessionId
+  delete chat.backgroundHistoryIds
+  delete chat.importHistory
+  delete chat.backgroundTasks
   // A fork never inherits a half-replaced round; its copy of the reply is final.
   delete chat.replacingDshTurns
   chat.id = targetChatId
   chat.sessionId = targetSessionId
   chat.createdAt = now
   chat.updatedAt = now
-  chat.nativeOpeningAppended = true
-  chat.nativeCommits = {}
+  chat.nativeOpeningAppended = options.preserveNativeSync === true ? Boolean(source.nativeOpeningAppended) : true
+  const lastNativeTurn = nonNegativeInt(options.lastNativeTurn)
+  const kept = turn => Number(turn) <= lastNativeTurn
+  if (options.preserveNativeCommits === true && source.nativeCommits && typeof source.nativeCommits === 'object' && !Array.isArray(source.nativeCommits)) {
+    chat.nativeCommits = lastNativeTurn !== undefined
+      ? Object.fromEntries(Object.entries(clone(source.nativeCommits)).filter(([turn]) => kept(turn)))
+      : {}
+  } else {
+    chat.nativeCommits = {}
+  }
   // The host forks the native event history with its original turn numbers.
   // Keep its rollback/regeneration projection alongside the copied game state,
   // but only up to the fork point: the fork numbers its next native turns from
   // there, and a hidden-turn entry left above it would hide a new reply.
-  const lastNativeTurn = Number(options.lastNativeTurn)
-  if (Number.isSafeInteger(lastNativeTurn) && lastNativeTurn >= 0) {
-    const kept = turn => Number(turn) <= lastNativeTurn
+  if (lastNativeTurn !== undefined) {
     if (Array.isArray(chat.suppressedDshTurns)) chat.suppressedDshTurns = chat.suppressedDshTurns.filter(kept)
     if (Array.isArray(chat.hiddenDshErrorTurns)) chat.hiddenDshErrorTurns = chat.hiddenDshErrorTurns.filter(kept)
     if (chat.regeneratedDshTurns && typeof chat.regeneratedDshTurns === 'object') {
@@ -80,9 +98,12 @@ export function forkConversationChat(source, options = {}) {
     revision: Math.max(0, Number(sourceTimeline.revision) || 0),
     storageRevision: Math.max(0, Number(source._storageRevision) || 0),
     checkpointId: str(latestCheckpoint && latestCheckpoint.id),
+    kind: options.duplicate ? 'duplicate' : undefined,
+    turn: nonNegativeInt(options.turn),
+    atSeq: nonNegativeInt(options.atSeq),
     // Story forks are addressed by message, so the absolute index travels with the
     // origin record; native-turn forks leave it out.
-    messageIndex: Number.isSafeInteger(options.messageIndex) && options.messageIndex >= 0 ? Number(options.messageIndex) : undefined,
+    messageIndex: nonNegativeInt(options.messageIndex),
     forkedAt: now
   }
   chat.timeline = {
@@ -98,12 +119,13 @@ export function forkConversationChat(source, options = {}) {
 }
 
 export function assertConversationForkable(chat, options = {}) {
-  if (!chat) throw new Error('找不到要分叉的对话')
-  if (!['story', 'script'].includes(str(chat.mode) || 'story')) throw new Error('只有游玩对话可以分叉')
+  const verb = options.duplicate ? '复制' : '分叉'
+  if (!chat) throw new Error('找不到要' + verb + '的对话')
+  if (!['story', 'script'].includes(str(chat.mode) || 'story')) throw new Error('只有游玩对话可以' + verb)
   // A historical snapshot may have been saved while the source was regenerating a later
   // turn (its pre-regeneration checkpoint). Its content up to the fork turn is settled; only
   // the live source's in-flight work blocks forking.
-  if (options.historical !== true && (options.agentRunning === true || chat.regenInProgress === true)) throw new Error('当前正文仍在生成，请等待完成后再分叉')
+  if (options.historical !== true && (options.agentRunning === true || chat.regenInProgress === true)) throw new Error('当前正文仍在生成，请等待完成后再' + verb)
   const timeline = object(chat.timeline)
   // Only a live foreground Agent advances a body operation. A body still marked
   // 'running' while nothing runs is an aborted round (page reloaded, host
@@ -119,13 +141,13 @@ export function assertConversationForkable(chat, options = {}) {
     }
     return operation.status === 'running'
   })
-  if (unfinished) throw transientForkError('当前轮次尚未完成生成或状态结算，请等待完成后再分叉')
-  if (['pending', 'running'].includes(str(chat.settleStatus))) throw transientForkError('当前轮次尚未完成状态结算，请等待完成后再分叉')
+  if (unfinished) throw transientForkError('当前轮次尚未完成生成或状态结算，请等待完成后再' + verb)
+  if (['pending', 'running'].includes(str(chat.settleStatus))) throw transientForkError('当前轮次尚未完成状态结算，请等待完成后再' + verb)
   if (chat.mvu?.enabled === true && chat.mvu?.openingInitialization?.status === 'pending') {
-    throw transientForkError('MVU 开局状态尚未初始化完成，请等待完成后再分叉')
+    throw transientForkError('MVU 开局状态尚未初始化完成，请等待完成后再' + verb)
   }
   const messages = Array.isArray(chat.messages) ? chat.messages : []
   const last = messages[messages.length - 1]
-  if (last && last.role === 'user') throw new Error('当前玩家输入尚未产生正文，不能分叉')
+  if (last && last.role === 'user') throw new Error('当前玩家输入尚未产生正文，不能' + verb)
   return true
 }

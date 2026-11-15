@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "revision": "64e1e22c87c8ef0be010cd0859220d89e16d5c72",
-  "releaseSequence": 4,
+  "revision": "79b133ed137c8a83a45f51797d4c5ce1dc7b4f57",
+  "releaseSequence": 5,
   "version": "3.3.0",
   "files": [
     {
@@ -3001,8 +3001,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/rollback-surface.js",
-      "sha256": "324ae8c30b3e0f1f62f4b4e2e3f180c9659e23f4a150b8e71726c2cced9ee67b",
-      "size": 62698
+      "sha256": "cc4a6ec6418b9e643a56891ebb176b4c058775aa03030d166e149b3bc5befa6b",
+      "size": 64703
     },
     {
       "path": "tavern-plugin/lib/domain/round-anchor.js",
@@ -3201,8 +3201,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/session-turn-input.js",
-      "sha256": "db057e601de0187b374289f974d774e22d516ea0b4080f98167fa9da4dbae538",
-      "size": 4180
+      "sha256": "ace083b5f9e6df86599547ed2167626aae1d54f24cb37309f1f4dc03211de7f1",
+      "size": 4360
     },
     {
       "path": "tavern-plugin/lib/domain/session-turn-result.js",
@@ -3651,8 +3651,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/template-history.js",
-      "sha256": "5d188eab480fc7641bee519082f813d8e1e1d8a14d61b897cf610c2d74d4560e",
-      "size": 8160
+      "sha256": "5cd4bfcce3abc3b31fe3b84ebb3873577bead6c023a95c8e05c44414ea17a9f0",
+      "size": 8325
     },
     {
       "path": "tavern-plugin/lib/domain/template-message.js",
@@ -3786,8 +3786,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/uncommitted-rounds.js",
-      "sha256": "7e9ab51972284f4560ab9465010ddf4b8a1b4d23da117f2a2c386cd3df530ce0",
-      "size": 3547
+      "sha256": "c9517508cef3b28d9731ef693ab3b872c951111355bb8a5d47d019ca9a97a6e3",
+      "size": 4083
     },
     {
       "path": "tavern-plugin/lib/domain/update-status-controller.js",
@@ -9271,9 +9271,9 @@
     }
   ],
   "archive": {
-    "commit": "d2fcf2a62dd18c4b177e7782a83a849433a3917a",
+    "commit": "6424cc006ce442411c84c91ddde2eccadd030e28",
     "path": "runtime.zip",
-    "sha256": "a31289e82f9ba4f99f1ba06ca83e440beb9bbc437ef1af2ee9811c7b80840e2b",
-    "size": 16582950
+    "sha256": "6b2827740ef50a35b90ad86e31d87e33e1119cafdaeaf313f1887ae24a4b4a69",
+    "size": 16584064
   }
 }

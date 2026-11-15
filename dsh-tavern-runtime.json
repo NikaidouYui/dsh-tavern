@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "revision": "173087f7ee7ba376a31b8ed1c1da13d668bc4095",
-  "releaseSequence": 6,
+  "revision": "ab164b622557817423673972a59dcf77134331f6",
+  "releaseSequence": 7,
   "version": "3.3.0",
   "files": [
     {
@@ -1621,8 +1621,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/chat-session-state.js",
-      "sha256": "d170cf5d48de88e323ded46923916e7213b003d56fa64be3d455ce3eb68ea3c2",
-      "size": 24855
+      "sha256": "e5ac1dfde5f8fc6bfc023b6ccc090b62fd8f1e29a4b7990f73eb5a542280e259",
+      "size": 24906
     },
     {
       "path": "tavern-plugin/lib/domain/chat-snapshot-worker.js",
@@ -1906,8 +1906,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/foreground-handoff.js",
-      "sha256": "78204724e1b3d0a253049bd77b6b51686fb74dfcedd46db0ab4741d4b612b13a",
-      "size": 7491
+      "sha256": "1569cfd7f085ae84a0ba914b6cdee90844af3756795688c5c3bc111f4b096053",
+      "size": 8004
     },
     {
       "path": "tavern-plugin/lib/domain/foreground-orchestration-strategies.js",
@@ -3001,8 +3001,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/rollback-surface.js",
-      "sha256": "cc4a6ec6418b9e643a56891ebb176b4c058775aa03030d166e149b3bc5befa6b",
-      "size": 64703
+      "sha256": "55ce762218e124541ac1c50f1b6daf84bf2878f2c6b57aa7f6ccf17e2c8732df",
+      "size": 65603
     },
     {
       "path": "tavern-plugin/lib/domain/round-anchor.js",
@@ -3016,8 +3016,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/round-history.js",
-      "sha256": "a2538e7b2d0022d5365f62fe6ac88bc0f001bf7b5805763276a14256ad025ab4",
-      "size": 100374
+      "sha256": "314129ecb204daf5c375f4e7e4424a2ae09b023330e7b4b3b202b852b336ba2c",
+      "size": 119230
     },
     {
       "path": "tavern-plugin/lib/domain/runtime-content-projection.js",
@@ -4046,13 +4046,13 @@
     },
     {
       "path": "tavern-plugin/lib/hooks/request.js",
-      "sha256": "6a3abffb88ae4262707574375f15e57d2506a812c0323fb3215cd71a2576bd92",
-      "size": 6383
+      "sha256": "44c11f9dc9d8c46f11d665033710b2f51944afacaacb16c146bafd4fa17a51c0",
+      "size": 6479
     },
     {
       "path": "tavern-plugin/lib/hooks/turn-lifecycle.js",
-      "sha256": "bcc2009c2b38d3ef5a5815f61edde2e6a97bcbd6a7936235244d6cf22405c6dc",
-      "size": 15717
+      "sha256": "89ae70d219362ea695ef543e0f19c0c49e78f8922448769191a3a30e47b5dcdc",
+      "size": 15920
     },
     {
       "path": "tavern-plugin/lib/host/mod-dice.mjs",
@@ -4121,8 +4121,8 @@
     },
     {
       "path": "tavern-plugin/lib/index.js",
-      "sha256": "2222cd76959eaee865e0b6c1abc2ace12f1682ae38dd37b0076f88396f00370e",
-      "size": 313874
+      "sha256": "d1722f4dc60bdbd198c20b85ebb1dcf995192ac78688f69ee0060f2896d914a2",
+      "size": 314351
     },
     {
       "path": "tavern-plugin/lib/metadata-backup.js",
@@ -9271,9 +9271,9 @@
     }
   ],
   "archive": {
-    "commit": "fe5066b48557c635b7763932a8d1da101c27b8eb",
+    "commit": "20781a7cceb3e300d0eac7eeceddac8e41739ed6",
     "path": "runtime.zip",
-    "sha256": "7a164711e76698d14e6b24147aefc8356411fe6a8038232b57d87bbcce348051",
-    "size": 16584896
+    "sha256": "77bde4101ab968141994e06ffbc14e3f06e1d4b13ed302951a5918dec0f208ed",
+    "size": 16589154
   }
 }

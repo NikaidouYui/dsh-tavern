@@ -17,6 +17,10 @@
   "bin/desktop-host-paths.mjs": [
     "@deepseek-ai/dsh-agent"
   ],
+  "bin/llm-stream-timeout-patch.mjs": [
+    "@deepseek-ai/dsh-llm-deepseek",
+    "@deepseek-ai/dsh-llm-pi-ai"
+  ],
   "bin/official-desktop-runtime.cjs": [
     "@deepseek-ai/dsh-desktop"
   ],
@@ -44,7 +48,9 @@
     "@deepseek-ai/dsh-llm-pi-ai"
   ],
   "bin/service-lifecycle.mjs": [
-    "@deepseek-ai/dsh-client-ui-chat"
+    "@deepseek-ai/dsh-client-ui-chat",
+    "@deepseek-ai/dsh-llm-deepseek",
+    "@deepseek-ai/dsh-llm-pi-ai"
   ],
   "bin/test-runtime.mjs": [
     "@deepseek-ai/dsh-app-boot",
@@ -96,6 +102,10 @@
     "@deepseek-ai/dsh-session/package.json",
     "@deepseek-ai/dsh-session/surface",
     "@deepseek-ai/dsh-tools"
+  ],
+  "tavern-plugin/lib/domain/host-stream-timeout-patch.js": [
+    "@deepseek-ai/dsh-llm-deepseek",
+    "@deepseek-ai/dsh-llm-pi-ai"
   ],
   "tavern-plugin/lib/domain/host-subprocess-patch.js": [
     "@deepseek-ai/dsh-subprocess-local"

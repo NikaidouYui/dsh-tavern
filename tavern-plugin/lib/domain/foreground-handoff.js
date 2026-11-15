@@ -141,5 +141,14 @@ export function createForegroundHandoff(options = {}) {
     }
   }
 
-  return Object.freeze({ awaitOpening, prepare, finalize, syncCandidateMessageId, end, recover })
+  /** 在即将开始普通前台回合前清理未清理的失败轮及被放弃的重生成目标；重生成进行中不触发。 */
+  async function clearFailedTurns(sessionId) {
+    const chat = await (store.stateForSession || store.chatForSession)?.(sessionId)
+    if (chat === undefined) return 0
+    if (!['story', 'script'].includes(chat.mode || 'story')) return 0
+    if (chat.regenInProgress === true) return 0
+    return Number(await options.clearFailedTurns?.(sessionId)) || 0
+  }
+
+  return Object.freeze({ awaitOpening, prepare, clearFailedTurns, finalize, syncCandidateMessageId, end, recover })
 }

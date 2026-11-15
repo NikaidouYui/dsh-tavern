@@ -261,7 +261,7 @@ export function createSessionStateView({ activity: activityOf, evidence: evidenc
       // selection belongs to regeneration; busy/compaction locks stay separate.
       canRegenerate: true,
       canEditBody: hasRound,
-      rollbackTargetTurn: settlementTurn(chat),
+      rollbackTargetTurn: Number(chat.failedRegenerationTarget?.assistant?.turn) || settlementTurn(chat),
       failedTailTurn: failedTail === null ? null : failedTail.turn,
       failedTailPersisted: failedTail?.persisted === true,
       // The save decides: a round the native surface lost is repaired, not refused.
@@ -290,7 +290,7 @@ export function createSessionStateView({ activity: activityOf, evidence: evidenc
       activity,
       settleStatus: activity.busy ? 'running' : (activity.phase === 'failed' && activity.role === 'settlement' ? 'error' : 'done'),
       settleError: activity.reason === 'interrupted' ? '后台结算已中断，请重试结算。' : (chat.settleError || null),
-      settlementTurn: rollback.rollbackTargetTurn,
+      settlementTurn: settlementTurn(chat),
       scriptProgress,
       statusBarPlacement: chat.statusBarPlacement === 'body' ? 'body' : 'sidebar',
       updatedAt: chat.updatedAt || 0,

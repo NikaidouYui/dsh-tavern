@@ -4013,6 +4013,7 @@ export async function apply(ctx) {
   // hands it the services its tasks run on.
   registerBackgroundTasks(workflow, { readTavernSettings, polishPrereview, announceCast,
     gameTitles, saveMaintenance, pluginApi, candidateWorldbookPreparation, plotCompassService, backgroundTasks, queueSettlement, settlementJobs, settlementRun })
+  let abandonFailedRegeneration
   const foregroundHandoff = createForegroundHandoff({
     turns: turnOrchestrator,
     scriptDispatch: tavernScriptDispatch,
@@ -4045,11 +4046,17 @@ export async function apply(ctx) {
     clearFailedTurns: async function (sessionId) {
       const mode = await turnOrchestrator.modeFor(sessionId)
       if (mode !== 'story' && mode !== 'script') return 0
+      const state = await taskStateReader.forSession(sessionId)
+      if (state?.regenInProgress === true) return 0
+      let abandoned = 0
+      if (state?.failedRegenerationTarget?.assistant && typeof abandonFailedRegeneration === 'function') {
+        abandoned = await abandonFailedRegeneration(sessionId)
+      }
       const session = sessionStore.get(sessionId) || agentRegistry.get(sessionId)?.session
       // A failed tail sits after the save's latest round, and the walk stops there: the
       // header and the latest floors (that round's input and reply) are all it reads.
       const chat = session && await chatHeaderWithLatestFloors(sessionId, 3)
-      if (!chat) return 0
+      if (!chat) return abandoned
       const availability = rollbackAvailability(chat, { events: sessionEvents(session), nodes: session.surface?.nodes || [] })
       let cleared = 0
       // A turn the server stopped in the middle never ended, so nothing cleaned it up.
@@ -4073,7 +4080,7 @@ export async function apply(ctx) {
         }, { source: 'failed-turn.cleanup' })
       }
       else if (!availability.canRollback && availability.reason && /失败回合/.test(availability.reason)) console.warn('dsh-tavern: 上一次失败回合的残留无法清理，本轮请求可能带上它:', availability.reason)
-      return cleared
+      return cleared + abandoned
     },
     cleanupFailedTurn: async function (input) {
       // Keep the failed turn (input and output) on the surface until the player
@@ -4121,7 +4128,7 @@ export async function apply(ctx) {
     void mvuSettlementReconciler.scan()
   }
   // ---------- 重新生成正文（生成即替换，无确认） ----------
-  const { regenerate: nativeRegenBody, regenerateWithProvider, recover: recoverRegeneration, rollback: rollbackTurn, rollbackTo: rollbackToTurn, interrupt: interruptTurn, undoRollback: undoRollbackTurn } = createRoundHistory({
+  const { regenerate: nativeRegenBody, regenerateWithProvider, recover: recoverRegeneration, rollback: rollbackTurn, rollbackTo: rollbackToTurn, interrupt: interruptTurn, undoRollback: undoRollbackTurn, abandonFailedRegeneration: abandonRegen } = createRoundHistory({
     diagnostics: mvuDiagnostics,
     chats: { read: readChat, readState: taskStateReader.read, stateForSession: taskStateReader.forSession, forSession: chatForSession, readCard: readChatCard,
       readRevision: readChatRevision, write: writeChat, update: updateChat, patch: patchChat,
@@ -4193,6 +4200,7 @@ export async function apply(ctx) {
     trace: requestPerformance,
     sessionPatch,
   })
+  abandonFailedRegeneration = abandonRegen
 
   async function regenBody(chatId, guidance, sessionId, options = {}) {
     const id = sessionId || (await requestPerformance.stage('regen.resolve', () => readChat(chatId)))?.sessionId
@@ -4730,6 +4738,7 @@ export async function apply(ctx) {
     cardMemory,
     chatForSession: hookChatForSession,
     ctx,
+    foregroundHandoff,
     foregroundStrategies,
     persistClearedBodyEdits,
     requestCoordinates,

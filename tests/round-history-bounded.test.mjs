@@ -140,7 +140,7 @@ async function fixture(t, bounded, { earlyInput = false } = {}) {
     queueSettlement: async () => { directed.push('settlement') }, cancelSettlement: async () => {},
     present: async value => { presented.push(isScopedMessages(value.messages) ? 'window' : 'full'); return { rolled: true } }
   })
-  return { p, rounds, calls, session, dispatched, presented, hooks, directed, agent, root }
+  return { p, timeline, rounds, calls, session, dispatched, presented, hooks, directed, agent, root }
 }
 
 function comparable(chat) {
@@ -458,4 +458,88 @@ test('bounded rollbackRecent 清除指向 hiddenTurn 的反向 regeneratedDshTur
     outcomes.push(after.regeneratedDshTurns)
   }
   assert.deepEqual(outcomes[0], outcomes[1])
+})
+
+import { Session as NativeSession } from './fixtures/dsh-session-host.mjs'
+import { appendSessionEvent as appendNativeEvent, sessionEvents as listNativeEvents, openTurnStep as readOpenTurnStep } from '../tavern-plugin/lib/domain/session-events.js'
+
+test('bounded 与全量模式下 abandonFailedRegeneration 都回滚 checkpoint 并保留新写入的 placeholder 输入', async t => {
+  for (const bounded of [true, false]) {
+    const h = await fixture(t, bounded, { earlyInput: true })
+    const nativeSession = NativeSession.create('abandon-' + bounded)
+    appendNativeEvent(nativeSession, 'turn/start', { turn: 81 })
+    const inSeq = appendNativeEvent(nativeSession, 'user/message', {
+      id: 'in-81', role: 'user', content: [{ type: 'text', text: '推门 〔3〕' }], source: { kind: 'user', rpcId: 'input-81' }
+    }, { surfaceOp: 'append' })
+    appendNativeEvent(nativeSession, 'step/start', { turn: 81, step: 1 })
+    const outSeq = appendNativeEvent(nativeSession, 'assistant/message', {
+      turn: 81, step: 1, message: { id: 'out-81', role: 'assistant', content: [{ type: 'text', text: '新正文' }], source: model }
+    }, { surfaceOp: 'append', sourceEventSeqs: [] })
+    appendNativeEvent(nativeSession, 'step/end', { turn: 81, step: 1 })
+    appendNativeEvent(nativeSession, 'turn/end', { turn: 81, reason: { kind: 'completed' } })
+
+    // 模拟第 81 轮重生成失败并已撤成仅剩 u_old，且新回合 83 已开局、玩家刚刚落盘新 placeholder 输入
+    await h.p.update('chat', current => {
+      const targetIndex = current.messages.length - 1
+      const targetAssistant = { ...structuredClone(current.messages[targetIndex]),
+        nativeAnchor: { formatVersion: 4, turn: 81, input: inSeq.seq, reply: outSeq.seq } }
+      current.messages.pop()
+      current.failedRegenerationTarget = { assistantIndex: targetIndex, inputIndex: targetIndex - 1, assistant: targetAssistant, dshTurn: 81 }
+      current.replacingDshTurns = [81]
+      current.messages.push({ role: 'user', text: '下一轮新消息', native: true, placeholder: true, source: { kind: 'user', rpcId: 'rpc-next-83' } })
+      return current
+    }, { source: 'test.seed-failed-regen-and-next-input' })
+
+    appendNativeEvent(nativeSession, 'turn/start', { turn: 83 })
+
+    let flushed = 0
+    const rounds = createRoundHistory({
+      chats: {
+        read: id => h.p.read(id),
+        forSession: () => h.p.read('chat'),
+        readCard: () => h.p.readCard?.('chat') || ({ name: '角色' }),
+        readRevision: (id, rev) => h.p.readRevision(id, rev),
+        write: (value, meta) => h.p.write(value, meta),
+        update: (id, fn, meta) => h.p.update(id, fn, meta),
+        patch: (id, rev, changes, meta) => h.p.patch?.(id, rev, changes, meta),
+        readRecent: () => h.p.read('chat'),
+        changedSince: (id, rev) => h.p.changedSince?.(id, rev),
+        rowsAt: (id, rev, indices) => h.p.rowsAt?.(id, rev, indices)
+      },
+      scripts: {},
+      timeline: h.timeline,
+      sessions: { get: () => ({ session: nativeSession, phase: { kind: 'running' } }), flush: async () => { flushed++ } }
+    })
+
+    const count = await rounds.abandonFailedRegeneration(nativeSession.id)
+    assert.equal(count, 1)
+    assert.ok(flushed >= 1)
+
+    const after = await h.p.read('chat')
+    assert.equal(after.failedRegenerationTarget, undefined)
+    assert.equal(after.replacingDshTurns, undefined)
+    assert.equal(after.posture, '门外')
+    assert.deepEqual(after.variables, { day: 1 })
+    assert.equal(after.nativeCommits['81'], undefined)
+    assert.deepEqual(after.messages.slice(-2).map(m => m.text), ['正文80', '下一轮新消息'])
+    assert.equal(after.messages.at(-1).placeholder, true)
+    assert.deepEqual(readOpenTurnStep(listNativeEvents(nativeSession)), { turn: 83, step: null }, '不得污染或抢占新回合 step')
+
+    // 紧接着新回合 83 正常落盘 step 1 与消息并恢复重放
+    appendNativeEvent(nativeSession, 'step/start', { turn: 83, step: 1 })
+    appendNativeEvent(nativeSession, 'user/message', {
+      id: 'in-83', role: 'user', content: [{ type: 'text', text: '下一轮新消息' }], source: { kind: 'user', rpcId: 'rpc-next-83' }
+    }, { surfaceOp: 'append' })
+    appendNativeEvent(nativeSession, 'assistant/message', {
+      turn: 83, step: 1, message: { id: 'out-83', role: 'assistant', content: [{ type: 'text', text: '第83轮正文' }], source: model }
+    }, { surfaceOp: 'append', sourceEventSeqs: [] })
+    appendNativeEvent(nativeSession, 'step/end', { turn: 83, step: 1 })
+    appendNativeEvent(nativeSession, 'turn/end', { turn: 83, reason: { kind: 'completed' } })
+
+    const events = listNativeEvents(nativeSession)
+    const reopened = NativeSession.fromRestore(nativeSession.id, events, nativeSession.header, 0, 'detached')
+    const deriveTexts = JSON.stringify(reopened.deriveMessages())
+    assert.match(deriveTexts, /第83轮正文/)
+    assert.doesNotMatch(deriveTexts, /新正文|推门 〔3〕/)
+  }
 })

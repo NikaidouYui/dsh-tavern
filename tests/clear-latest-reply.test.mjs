@@ -153,3 +153,33 @@ test('界面目标变化或前后台忙时，清理请求不会写入', async ()
   assert.deepEqual(h.chat, before)
   assert.deepEqual(h.calls, [])
 })
+
+test('存在重生成失败目标时，failedTailOnly 只清新增失败尾且绝不误删原玩家输入', async () => {
+  const h = fixture(['completed'])
+  const originalReply = structuredClone(h.chat.messages.at(-1))
+  h.chat.messages.pop()
+  h.chat.failedRegenerationTarget = { assistantIndex: 2, inputIndex: 1, assistant: originalReply, dshTurn: 2 }
+  h.chat.replacingDshTurns = [2]
+
+  // 无新增失败 attempt 时：failedTailOnly / clearLatestReply 不得把原玩家输入当 orphan 删掉
+  assert.equal(h.state().clearIncompleteReplyTarget, null)
+  await assert.rejects(h.history.rollback(h.session.id, h.chat.id, 2, { failedTailOnly: true }), /清理目标已经变化/)
+  assert.deepEqual(h.chat.messages.map(row => row.text), ['开场白', '输入2'])
+  assert.ok(h.chat.failedRegenerationTarget)
+
+  // 追加一次 Turn 3 orphan attempt（未产正文）后：clearLatestReply 与 failedTailOnly 仅清 Turn 3，保留 输入2 与 failedRegenerationTarget
+  appendSessionEvent(h.session, 'turn/start', { turn: 3 })
+  appendSessionEvent(h.session, 'user/message',
+    { id: 'in-3', role: 'user', content: [{ type: 'text', text: '输入2' }], source: { kind: 'plugin', plugin: 'dsh-tavern-regen' } },
+    { surfaceOp: 'append' })
+  appendSessionEvent(h.session, 'turn/end', { turn: 3, reason: { kind: 'error', error: { message: '超时' } } })
+
+  const state = h.state()
+  assert.deepEqual(state.clearIncompleteReplyTarget, { kind: 'failed-tail', turn: 3 })
+  const cleared = await h.clear(state.clearIncompleteReplyTarget)
+  assert.equal(cleared.deletedCount, 0)
+  assert.equal(cleared.cleared, true)
+  assert.deepEqual(h.chat.messages.map(row => row.text), ['开场白', '输入2'])
+  assert.ok(h.chat.failedRegenerationTarget, '只清 Turn 3 attempt 后仍保留 failedRegenerationTarget')
+  assert.ok(h.chat.suppressedDshTurns.includes(3))
+})

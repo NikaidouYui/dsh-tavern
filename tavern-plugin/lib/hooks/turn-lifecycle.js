@@ -242,6 +242,8 @@ export function registerTurnLifecycleHooks({
     // DSH assembles the system prompt before agent/pre-step. The first request freezes the
     // variable directory into it, so the opening's MVU variables must be saved before that.
     if (variableDirectoryOpen(agent.session)) await foregroundHandoff.awaitOpening(agent.session.id)
+    // DSH 在 step=1 前就会在此处组装系统提示词、世界书与静态前缀，先放弃旧重生成失败目标并清尾。
+    await foregroundHandoff?.clearFailedTurns?.(agent.session.id)
     const chat = await hookChatForSession(agent.session.id)
     if (chat) await synchronizeTemplateHistory(agent.session, chat, session => sessionStore.flush(session))
     if (chat) await synchronizeBodyEdits(agent.session, chat, session => sessionStore.flush(session), persistClearedBodyEdits)

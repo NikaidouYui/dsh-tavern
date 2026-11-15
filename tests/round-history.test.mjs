@@ -858,12 +858,15 @@ test('候选恢复不需要历史回滚点，只清原生尝试与标记', async
   assert.equal(h.chat.nativeSync, undefined)
 })
 
-test('另一进程留下的重生成标志清理后没有旧正文可供回退', async () => {
+test('另一进程留下的重生成标志清理后仍可回退该轮（包含已撤正文的输入与原生节点）', async () => {
   const { h } = await interruptedRegeneration()
   const original = structuredClone(h.revisions.get(h.chat.regenRecovery.beforeRevision).messages)
-  await assert.rejects(h.create().rollback('session', 'chat'), /当前没有可回退的已提交轮次/)
+  const view = await h.create().rollback('session', 'chat')
+  assert.ok(view.rolledBack)
   assert.ok(!h.chat.regenInProgress)
-  assert.deepEqual(h.chat.messages, original.slice(0, -1))
+  assert.equal(h.chat.failedRegenerationTarget, undefined)
+  assert.equal(h.chat.messages.length, original.length - 2)
+  assert.equal(h.chat.posture, '门外')
 })
 
 test('重新生成准备缓存命中后跳过重新组建，但仍发送模型请求', async () => {
@@ -1201,4 +1204,197 @@ test('复制完整会话（含重生成、失败清理占位与 session/end-seed
   assert.match(deriveTexts, /开场白/)
   assert.doesNotMatch(deriveTexts, /正文7|正文6|重摇正文2|失败输入5/)
 })
+
+import { rollbackAvailability } from '../tavern-plugin/lib/domain/rollback-surface.js'
+import { createSessionStateView, projectChatSessionState } from '../tavern-plugin/lib/domain/chat-session-state.js'
+import { Session } from './fixtures/dsh-session-host.mjs'
+import { appendSessionEvent, sessionEvents as readSessionEvents } from '../tavern-plugin/lib/domain/session-events.js'
+
+function createMultiRoundRegenFailureFixture({ dropFailedInput = false } = {}) {
+  const model = { kind: 'model', provider: 'fixture', model: 'fixture' }
+  const session = Session.create('regen-fail-rollback-' + Math.random().toString(36).slice(2))
+  let counter = 0
+  const revisions = new Map()
+  const timeline = createStoryTimeline({ id: prefix => prefix + '-' + (++counter), now: () => 2000 })
+  let chat = {
+    id: 'chat', sessionId: session.id, mode: 'story', _storageRevision: 1,
+    tavernHelperLifecycleRevision: 1,
+    messages: [{ role: 'assistant', greeting: true, text: '开场白', turn: 1 }],
+    posture: '起点', variables: { score: 0 }, nativeCommits: {}, userInputEdits: {}
+  }
+  const commitRound = (turn, userText, replyText, posture, score) => {
+    revisions.set(chat._storageRevision, structuredClone(chat))
+    appendSessionEvent(session, 'turn/start', { turn })
+    const inEvt = appendSessionEvent(session, 'user/message', {
+      id: 'in-' + turn, role: 'user', content: [{ type: 'text', text: userText }],
+      source: { kind: 'user', rpcId: 'rpc-' + turn }
+    }, { surfaceOp: 'append' })
+    appendSessionEvent(session, 'step/start', { turn, step: 1 })
+    const outEvt = appendSessionEvent(session, 'assistant/message', {
+      turn, step: 1,
+      message: { id: 'out-' + turn, role: 'assistant', content: [{ type: 'text', text: replyText }], source: model }
+    }, { surfaceOp: 'append', sourceEventSeqs: [] })
+    appendSessionEvent(session, 'step/end', { turn, step: 1 })
+    appendSessionEvent(session, 'turn/end', { turn, reason: { kind: 'completed' } })
+    const begun = timeline.apply({ chat, intent: { kind: 'body.begin', turn, userText } })
+    chat = timeline.complete({
+      chat: begun.chat, operationId: begun.value.operationId, basedOn: begun.value.basedOn,
+      outcome: { status: 'success' },
+      apply(draft) {
+        draft.messages.push(
+          { role: 'user', turn, text: userText, native: true, source: { kind: 'user', rpcId: 'rpc-' + turn } },
+          { role: 'assistant', turn, text: replyText, sourceText: replyText, swipes: [replyText], swipeId: 0,
+            messageUid: 'uid-' + turn, variables: [{ score }],
+            nativeAnchor: { formatVersion: 4, turn, input: inEvt.seq, reply: outEvt.seq } }
+        )
+        draft.posture = posture
+        draft.variables = { score }
+        draft.nativeCommits[String(turn)] = { turn, userText }
+        draft.userInputEdits[String(turn)] = { text: userText, id: 'in-' + turn, seq: inEvt.seq, role: 'user' }
+      }
+    }).chat
+    chat._storageRevision += 1
+  }
+  commitRound(2, '第2轮输入', '第2轮正文', '阶段2', 20)
+  commitRound(3, '第3轮输入', '第3轮正文', '阶段3', 30)
+  revisions.set(chat._storageRevision, structuredClone(chat))
+
+  // 模拟第 3 轮点击重生成：第 4 轮 attempt 失败后留下的 failedRegenerationTarget（旧正文已从 messages 移除，但原生面与 checkpoint 仍在）
+  const assistantIndex = chat.messages.length - 1
+  const inputIndex = chat.messages.length - 2
+  const discardedAssistant = structuredClone(chat.messages[assistantIndex])
+  chat.messages.pop()
+  if (dropFailedInput) chat.messages.pop()
+  chat.failedRegenerationTarget = { assistantIndex, inputIndex, assistant: discardedAssistant, dshTurn: 3 }
+  chat.replacingDshTurns = [3]
+
+  appendSessionEvent(session, 'turn/start', { turn: 4 })
+  const retryIn = appendSessionEvent(session, 'user/message', {
+    id: 'in-4', role: 'user', content: [{ type: 'text', text: '第3轮输入' }],
+    source: { kind: 'plugin', plugin: 'dsh-tavern-regen', regenerationId: 'regen-1', regenerationMode: 'plain' }
+  }, { surfaceOp: 'append' })
+  appendSessionEvent(session, 'turn/end', { turn: 4, reason: { kind: 'error', error: { message: '网络中断' } } })
+  appendSessionEvent(session, 'turn/start', { turn: 5 })
+  appendSessionEvent(session, 'user/message', {
+    id: 'abort-4', role: 'user', content: [],
+    source: { kind: 'plugin', plugin: 'dsh-tavern-regeneration-abort' }
+  }, { surfaceOp: { op: 'replace', start: retryIn.seq, end: retryIn.seq }, sourceEventSeqs: [retryIn.seq] })
+  appendSessionEvent(session, 'turn/end', { turn: 5, reason: { kind: 'completed' } })
+  chat.suppressedDshTurns = [4]
+
+  const agent = { session, phase: { kind: 'idle', lastTurn: 5 } }
+  const chats = {
+    read: async () => structuredClone(chat),
+    forSession: async () => structuredClone(chat),
+    readCard: async () => ({ name: '角色' }),
+    readRevision: async (_id, revision) => {
+      const hit = revisions.get(revision)
+      return hit ? structuredClone(hit) : undefined
+    },
+    update: async (_id, mutate) => {
+      revisions.set(chat._storageRevision, structuredClone(chat))
+      const next = await mutate(structuredClone(chat))
+      if (next !== undefined) {
+        next._storageRevision = (chat._storageRevision || 1) + 1
+        chat = structuredClone(next)
+        revisions.set(chat._storageRevision, structuredClone(chat))
+      }
+      return structuredClone(chat)
+    }
+  }
+  const sessionState = createSessionStateView({
+    activity: () => ({ busy: false }),
+    evidence: () => ({ session, events: readSessionEvents(session) })
+  })
+  const history = createRoundHistory({
+    chats,
+    timeline,
+    sessions: { get: () => agent, flush: async () => {} },
+    scripts: {},
+    present: async () => structuredClone(chat)
+  })
+  return {
+    session,
+    history,
+    get chat() { return chat },
+    state: () => sessionState.rollback(projectChatSessionState(chat))
+  }
+}
+
+test('重生成失败保留目标后点击撤回：彻底清理原生表面、时间线与状态，且可继续连续回退更早轮次', async () => {
+  const h = createMultiRoundRegenFailureFixture()
+  assert.equal(h.state().canRollback, true)
+  assert.equal(h.state().rollbackTargetTurn, 3)
+
+  const first = await h.history.rollback(h.session.id, h.chat.id)
+  assert.ok(first.rolledBack)
+  assert.equal(first.rolledBack.hiddenTurn, 3)
+  assert.equal(first.clearedInput, '第3轮输入')
+  assert.deepEqual(h.chat.messages.map(m => m.text), ['开场白', '第2轮输入', '第2轮正文'])
+  assert.equal(h.chat.posture, '阶段2')
+  assert.deepEqual(h.chat.variables, { score: 20 })
+  assert.equal(h.chat.failedRegenerationTarget, undefined)
+  assert.equal(h.chat.replacingDshTurns, undefined)
+  assert.equal(h.chat.nativeCommits['3'], undefined)
+
+  const afterFirst = readSessionEvents(h.session)
+  const reopened1 = Session.fromRestore(h.session.id, afterFirst, h.session.header, 0, 'detached')
+  const texts1 = JSON.stringify(reopened1.deriveMessages())
+  assert.match(texts1, /第2轮正文/)
+  assert.doesNotMatch(texts1, /第3轮输入|第3轮正文/)
+
+  assert.equal(h.state().canRollback, true)
+  assert.equal(h.state().rollbackTargetTurn, 2)
+  const second = await h.history.rollback(h.session.id, h.chat.id)
+  assert.ok(second.rolledBack)
+  assert.equal(second.rolledBack.hiddenTurn, 2)
+  assert.deepEqual(h.chat.messages.map(m => m.text), ['开场白'])
+  assert.equal(h.chat.posture, '起点')
+  assert.deepEqual(h.chat.variables, { score: 0 })
+})
+
+test('遗留重生成失败现场已误删输入时：撤回仍能自愈清理原生残留并允许继续撤回更早轮次', async () => {
+  const h = createMultiRoundRegenFailureFixture({ dropFailedInput: true })
+  assert.equal(h.state().canRollback, true)
+  assert.equal(h.state().rollbackTargetTurn, 3)
+
+  const first = await h.history.rollback(h.session.id, h.chat.id)
+  assert.ok(first.rolledBack)
+  assert.equal(first.rolledBack.hiddenTurn, 3)
+  assert.equal(first.clearedInput, undefined)
+  assert.deepEqual(h.chat.messages.map(m => m.text), ['开场白', '第2轮输入', '第2轮正文'])
+  assert.equal(h.chat.posture, '阶段2')
+  assert.equal(h.chat.failedRegenerationTarget, undefined)
+  assert.equal(h.chat.replacingDshTurns, undefined)
+  const afterFirst = readSessionEvents(h.session)
+  const reopened1 = Session.fromRestore(h.session.id, afterFirst, h.session.header, 0, 'detached')
+  assert.doesNotMatch(JSON.stringify(reopened1.deriveMessages()), /第3轮输入|第3轮正文/)
+
+  assert.equal(h.state().canRollback, true)
+  const second = await h.history.rollback(h.session.id, h.chat.id)
+  assert.ok(second.rolledBack)
+  assert.deepEqual(h.chat.messages.map(m => m.text), ['开场白'])
+})
+
+test('直接指定轮次回退 rollbackTo 能越过重生成失败轮次而不停留在底层', async () => {
+  const h = createMultiRoundRegenFailureFixture()
+  // rollbackTo(2) 的语义是“回到第 2 轮（让第 2 轮成为最新一轮）”，应先彻底清理第 3 轮的 failedRegenerationTarget。
+  await h.history.rollbackTo(h.session.id, h.chat.id, 2)
+  assert.deepEqual(h.chat.messages.map(m => m.text), ['开场白', '第2轮输入', '第2轮正文'])
+  assert.equal(h.chat.posture, '阶段2')
+  assert.deepEqual(h.chat.variables, { score: 20 })
+  assert.equal(h.chat.failedRegenerationTarget, undefined)
+
+  // 从第 3 轮重生成失败状态一步直接 rollbackTo(1) 也应越过第 3 轮与第 2 轮回到开场白。
+  const h2 = createMultiRoundRegenFailureFixture()
+  await h2.history.rollbackTo(h2.session.id, h2.chat.id, 1)
+  assert.deepEqual(h2.chat.messages.map(m => m.text), ['开场白'])
+  assert.equal(h2.chat.posture, '起点')
+  assert.deepEqual(h2.chat.variables, { score: 0 })
+  assert.equal(h2.chat.failedRegenerationTarget, undefined)
+  const events = readSessionEvents(h2.session)
+  const reopened = Session.fromRestore(h2.session.id, events, h2.session.header, 0, 'detached')
+  assert.doesNotMatch(JSON.stringify(reopened.deriveMessages()), /第2轮正文|第3轮正文/)
+})
+
 

@@ -44,6 +44,7 @@ export function registerRequestHooks({
   projectWorldbookRecovery,
   chatForSession,
   ctx,
+  foregroundHandoff,
   foregroundStrategies,
   openingRequest,
   persistClearedBodyEdits,
@@ -73,7 +74,10 @@ export function registerRequestHooks({
     // carries it, but has its own Tavern chat.
     if (backgroundAgentRunner.owns(sessionId) || (payload.agent.session.header?.parentSession && !await chatForSession(sessionId))) return next()
     if (gameModes && ['story', 'script'].includes((await chatForSession(sessionId))?.mode) && await gameModes.active(sessionId)) throw new Error('本局由玩法插件接管，请在玩法面板中行动')
-    if (Number(payload.step) === 1) await openingRequest?.beforeFirstStep(sessionId)
+    if (Number(payload.step) === 1) {
+      await openingRequest?.beforeFirstStep(sessionId)
+      await foregroundHandoff?.clearFailedTurns?.(sessionId)
+    }
     const decision = await next()
     if (decision.kind === 'reject') return decision
     const chat = await chatForSession(sessionId)

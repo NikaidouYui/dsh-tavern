@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { inputKind, isTurnInput, isNewTurnInput, isNewPlayerInput, isFailedTurnEnd } from './session-turn-input.js'
 import { resolveRoundAnchor, validAnchor } from './round-anchor.js'
 import { isPluginSource, isProducerSource, sourceProducerName } from './message-source.js'
+import { restoreDiscardedRegeneration } from './regeneration-discard.js'
 
 function object(value) {
   return value !== null && typeof value === 'object' ? value : null
@@ -76,12 +77,17 @@ function isForegroundContext(event) {
     ['foreground-frame', 'worldbook-snapshot', 'snapshot', 'variable-changes'].includes(source.form)
 }
 
+function isRegenerationAbandonTombstone(event) {
+  return Boolean(event && event.type === 'user/message' && sourceProducerName(event.data?.source) === 'dsh-tavern-regeneration-abandon')
+}
+
 export function isRollbackUserTombstone(event) {
   const source = event && event.type === 'user/message' && event.data && event.data.source
   const producer = sourceProducerName(source)
   return producer !== '' && (
     producer === 'dsh-tavern-failed-turn-cleanup' ||
     producer === 'dsh-tavern-regeneration-abort' ||
+    producer === 'dsh-tavern-regeneration-abandon' ||
     producer === 'dsh-tavern-context-window'
   )
 }
@@ -275,7 +281,7 @@ export function rolledBackSurfaceTurns(events) {
     if (event.surfaceOp?.op === 'replace') for (const source of event.sourceEventSeqs || []) visit(source)
   }
   for (const event of events) {
-    if (restored.has(event.seq) || !isRollbackAssistantTombstone(event, events)) continue
+    if (restored.has(event.seq) || (!isRollbackAssistantTombstone(event, events) && !isRegenerationAbandonTombstone(event))) continue
     for (const seq of event.sourceEventSeqs || []) visit(seq)
   }
   return [...turns].sort((left, right) => left - right)
@@ -1082,11 +1088,12 @@ function unclearedFailedTail(chat, events, nodes) {
     return !isRollbackAssistantTombstone(event, events) && !isRollbackUserTombstone(event) && !isForegroundContext(event)
   })
   if (tail === undefined) return []
-  const latest = (chat.messages || []).findLast(message => message?.role === 'assistant' && message.placeholder !== true)
+  const planningChat = chat?.failedRegenerationTarget?.assistant ? restoreDiscardedRegeneration(chat) : chat
+  const latest = (planningChat.messages || []).findLast(message => message?.role === 'assistant' && message.placeholder !== true)
   const lastEvent = eventAt(events, tail)
-  if (lastEvent?.type === 'assistant/message' && (storyEventTurn(lastEvent) === Number(latest?.turn) || storyEventTurn(lastEvent) === Number(chat.regeneratedDshTurns?.[String(latest?.turn)]))) return []
-  const committed = new Set((chat.messages || []).filter(message => message?.role === 'assistant' && message.placeholder !== true).map(message => Number(message.turn)))
-  for (const turn of Object.values(chat.regeneratedDshTurns || {})) committed.add(Number(turn))
+  if (lastEvent?.type === 'assistant/message' && (storyEventTurn(lastEvent) === Number(latest?.turn) || storyEventTurn(lastEvent) === Number(planningChat.regeneratedDshTurns?.[String(latest?.turn)]))) return []
+  const committed = new Set((planningChat.messages || []).filter(message => message?.role === 'assistant' && message.placeholder !== true).map(message => Number(message.turn)))
+  for (const turn of Object.values(planningChat.regeneratedDshTurns || {})) committed.add(Number(turn))
   const intervals = turnIntervals(events)
   const ownership = createSurfaceOwnership(events)
   let remaining = [...nodes]
@@ -1137,24 +1144,29 @@ function targetOverlapsPreviousRow(target, messages, latestIndex, evidence) {
 }
 
 function planRollbackAvailability(chat, { events = [], nodes = [] } = {}) {
-  const unclearedTurns = unclearedFailedTail(chat, events, nodes)
+  const failedRegen = chat?.failedRegenerationTarget?.assistant ? chat.failedRegenerationTarget : null
+  const planningChat = failedRegen ? restoreDiscardedRegeneration(chat) : chat
+  const unclearedTurns = unclearedFailedTail(planningChat, events, nodes)
   const failedTurns = [...new Set([...pendingFailedSurfaceTurns({ events, nodes, suppressed: chat.suppressedDshTurns || [] }), ...unclearedTurns])].sort((a, b) => a - b)
-  const clearIncompleteReplyTarget = incompleteReplyTarget(chat, failedTurns)
+  let clearIncompleteReplyTarget = incompleteReplyTarget(chat, failedTurns)
+  if (failedRegen && clearIncompleteReplyTarget?.kind === 'failed-tail' && failedTurns.length === 0) {
+    clearIncompleteReplyTarget = null
+  }
   if (failedTurns.length) return { canRollback: true, canClearIncompleteReply: true, clearIncompleteReplyTarget, failedTurns, unclearedTurns, target: null, reason: '' }
-  const messages = Array.isArray(chat.messages) ? chat.messages : []
+  const messages = Array.isArray(planningChat.messages) ? planningChat.messages : []
   const latestIndex = messages.findLastIndex(message => message?.role === 'assistant' && message.greeting !== true)
   const latest = latestIndex >= 0 ? messages[latestIndex] : undefined
   const evidence = { events, nodes }
   const located = locateRollbackSurface({ ...evidence, anchor: latest?.nativeAnchor })
   const target = located && !targetOverlapsPreviousRow(located, messages, latestIndex, evidence) ? located : null
-  if (isRescuedHistoryMessage(chat, latest)) return { canRollback: false, canClearIncompleteReply: false, failedTurns, target: null, reason: '存档救援导入的历史不可回退，请发送新消息继续' }
+  if (isRescuedHistoryMessage(planningChat, latest)) return { canRollback: false, canClearIncompleteReply: false, failedTurns, target: null, reason: '存档救援导入的历史不可回退，请发送新消息继续' }
   const turn = Number(latest?.turn)
   const anchorMatches = !validAnchor(latest?.nativeAnchor) || anchoredToSaveRow(target, latest, evidence)
-  const matchesTurn = Boolean(target && anchorMatches && (!(turn > 0) || target.turn === turn || target.turn === Number(chat.regeneratedDshTurns?.[String(turn)])))
+  const matchesTurn = Boolean(target && anchorMatches && (!(turn > 0) || target.turn === turn || target.turn === Number(planningChat.regeneratedDshTurns?.[String(turn)])))
   // 投影/修复写回的正文会带着别的剧情轮号：存档行记着它指的就是这一条，就还是这一轮。
   const matchesAnchor = Boolean(target && !matchesTurn && anchoredToSaveRow(target, latest, evidence))
   const matches = matchesTurn || matchesAnchor
-  const hasMessages = hasRollbackMessages(messages)
+  const hasMessages = hasRollbackMessages(messages) || Boolean(failedRegen && latest)
   const canRollback = hasMessages && Boolean(matches)
   return { canRollback, canClearIncompleteReply: clearIncompleteReplyTarget !== null, clearIncompleteReplyTarget, failedTurns, target: canRollback ? target : null,
     reason: canRollback ? '' : hasMessages ? '当前轮次已不在可回退的消息流中，请继续发送新消息；历史正文仍保留。' : '当前没有可回退的已提交轮次' }

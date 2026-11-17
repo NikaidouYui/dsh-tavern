@@ -4938,6 +4938,7 @@ export async function apply(ctx) {
     worldbookRecallLog,
     openReplyObservers: presentationObservers.openReply,
     replyStreamRewriters,
+    requestRewriters: pluginApi.requestRewriters,
     storyRetention,
   })
   registerTurnLifecycleHooks({

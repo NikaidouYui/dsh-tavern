@@ -202,6 +202,26 @@ ctx.tavern.replyRewriter({
 - 宿主自己也会写正文的场景不受影响：自动精修、玩家手动编辑、重新生成仍按各自流程覆盖正文。
 - 用 `ctx.tavern.apiVersion >= 8` 判断宿主是否支持。
 
+## 请求改写（`capabilities.requestRewriter === 1`）
+
+`ctx.tavern.requestRewriter({ rewrite })` 注册一个请求改写器，在预设投影、模板渲染完成后、写入请求日志与发往模型前调用。仅修改发往模型的临时请求副本，**不会改写 Story Timeline 存档与前端历史消息原文**。
+
+```js
+if (ctx.tavern.capabilities?.requestRewriter >= 1) {
+  ctx.tavern.requestRewriter({
+    async rewrite(request, context) {
+      // context: { gameId, chatId, mode, scope, turn, purpose, userText, provider, model, signal }
+      // scope: 'story' | 'background' | 'compaction' | 'card' | 'subagent'
+      return { request, wireEscape: 'full' } // wireEscape 可选: false | 'marked' | 'full'
+    }
+  })
+}
+```
+
+- 返回 `null` 或 `undefined` 表示本轮不做修改；返回修改后的 `request` 对象或 `{ request, wireEscape }`。
+- `wireEscape: 'full'` 会在底层 HTTP JSON 发送层将非 ASCII 字符转为标准单斜杠 `\uXXXX`；`'marked'` 仅转义 `\uE01E...\uE01F` 包裹的区间。
+- 多插件注册时按插件名顺序管道执行；卡内插件仅在所属人物卡的对局生效；异常、超时（30 秒）或非法返回只丢弃该插件该轮改写并记入日志，不影响正常生成。
+
 ## 暂时没有的
 
 下面这些目前还没有接口，不代表不能开放。有实际需要时请提[插件接口需求](https://github.com/flizzywine/dsh-tavern/issues/new?template=plugin-api.yml)，写清要做的插件和卡在哪一步，能开放的会按需补上。

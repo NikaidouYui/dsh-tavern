@@ -11,6 +11,8 @@ import { markRequestHandled, requestHandledBy } from '../domain/request-lineage.
 import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-strategies.js'
 import { STORY_CONTEXT_TOOL_NAME, STORY_SUBMIT_TOOL_NAME } from '../domain/story-tool-submission.js'
 import { isAutoToolOnlyModel, runWithToolProtocolDirective } from '../domain/tool-protocol-enforcement.js'
+import { attachWireEscape, runWithWireEscape, wireEscapeModeOf } from '../domain/wire-unicode-escape.js'
+import { isTurnInput } from '../domain/session-turn-input.js'
 import { createToolReplyStreamTracker } from '../domain/tool-reply-stream-parser.js'
 
 // Prompt prose source. Keys are stable; interpolation arguments are data.
@@ -34,6 +36,7 @@ export function registerModelStreamHooks({
   pluginSettlementProgress,
   replyStarted,
   replyStreamRewriters,
+  requestRewriters,
   requestCoordinates,
   storyRetention,
   runtimePrompt,
@@ -133,6 +136,26 @@ export function registerModelStreamHooks({
   async function latestLoggedTurn(chatId) {
     return (await modelRequestLog.list(chatId)).reduce((latest, entry) => Math.max(latest, Number(entry.turn) || 0), 0)
   }
+  function extractLatestUserText(messages) {
+    if (!Array.isArray(messages)) return ''
+    const extract = message => (Array.isArray(message?.content) ? message.content : [])
+      .filter(block => block && block.type === 'text' && typeof block.text === 'string')
+      .map(block => block.text)
+      .join('\n')
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (isTurnInput(messages[index])) {
+        const text = extract(messages[index]).trim()
+        if (text) return text
+      }
+    }
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === 'user') {
+        const text = extract(messages[index]).trim()
+        if (text) return text
+      }
+    }
+    return ''
+  }
   ctx.on('llm/stream', function (options, next) {
     const sessionId = str(options && options.sessionId)
     const coordinates = requestCoordinates.get(sessionId)
@@ -168,7 +191,6 @@ export function registerModelStreamHooks({
               : {})
           })
         : null
-      const stream = runWithToolProtocolDirective(activeDirective, () => next())
       // a director already owns frozen, projected sources.
       const director = backgroundContext?.task === 'stage-director'
       if (director) assertFrozenStageRequest(backgroundContext, options)
@@ -182,10 +204,40 @@ export function registerModelStreamHooks({
         yield * ctx.llm.stream(markRequestHandled({ ...options, ...projected }, 'full-template'))
         return
       }
-      let requestRecord = null
       // Agents a plugin creates under a game are not Tavern's own sessions; log them
       // as that game's background requests so 完整上下文 can show them.
       const child = options.purpose === undefined && !backgroundContext && !chat ? await gameChildSession(sessionId) : null
+      if (!director && !requestHandledBy(options, 'plugin-request-rewriter') && requestRewriters?.active) {
+        const scope = options.purpose === 'compaction' ? 'compaction'
+          : backgroundContext ? 'background'
+          : child ? 'subagent'
+          : chat && ['story', 'script'].includes(chat.mode) ? 'story'
+          : chat?.mode === 'card' ? 'card'
+          : ''
+        if (scope) {
+          const targetChat = child ? child.chat : chat
+          const targetGameId = child ? child.context.parentSessionId : ownerSessionId
+          const turn = Number(requestCoordinates.get(sessionId)?.turn) || (backgroundContext ? Number(backgroundContext.turn) || 0 : (child ? Number(child.context.turn) || 0 : 0))
+          const rewritten = await requestRewriters.apply(options, {
+            gameId: targetGameId,
+            chatId: targetChat?.id || '',
+            mode: targetChat?.mode || '',
+            scope,
+            turn,
+            purpose: options.purpose,
+            userText: scope === 'story' ? extractLatestUserText(options.messages) : '',
+            provider: str(options.provider),
+            model: str(options.model),
+            signal: options.signal
+          })
+          if (rewritten?.changed) {
+            const nextOptions = markRequestHandled(attachWireEscape(rewritten.request, rewritten.wireEscape), 'plugin-request-rewriter')
+            yield * ctx.llm.stream(nextOptions)
+            return
+          }
+        }
+      }
+      let requestRecord = null
       if (child) requestRecord = await modelRequestLog.record({ chat: child.chat, context: child.context, coordinates: {}, options })
       // Dev diagnostics: the summary request actually sent (after routing and story projection).
       else if (options.purpose === 'compaction' && requestHandledBy(options, 'compaction-projection') && chat !== undefined && ['story', 'script', 'card'].includes(chat.mode)) {
@@ -240,6 +292,8 @@ export function registerModelStreamHooks({
             signal: options.signal
           })
         : null
+      const wireEscapeMode = wireEscapeModeOf(options)
+      const stream = runWithWireEscape(wireEscapeMode, () => runWithToolProtocolDirective(activeDirective, () => next()))
       let finish = null, usage = null
       // 改写补出来的 text-delta 要沿用同一段正文的 index，assembler 靠它把 token 并进同一个正文块。
       let rewriteIndex = null
@@ -256,9 +310,9 @@ export function registerModelStreamHooks({
       let iterator, exhausted = false
       try {
         liveness.provider()
-        iterator = runWithToolProtocolDirective(activeDirective, () => stream[Symbol.asyncIterator]())
+        iterator = runWithWireEscape(wireEscapeMode, () => runWithToolProtocolDirective(activeDirective, () => stream[Symbol.asyncIterator]()))
         while (true) {
-          const item = await liveness.wait(runWithToolProtocolDirective(activeDirective, () => iterator.next()))
+          const item = await liveness.wait(runWithWireEscape(wireEscapeMode, () => runWithToolProtocolDirective(activeDirective, () => iterator.next())))
           if (item.done) {exhausted = true; break}
           let chunk = item.value
           liveness.chunk(chunk)

@@ -28,9 +28,9 @@
 
 | 阶段 | 输入 | 输出 | 现在开放的 |
 |---|---|---|---|
-| 输入 | 玩家原话 | 保存的玩家消息、发给模型的输入 | — |
+| 输入 | 玩家原话 | 保存的玩家消息、发给模型的输入 | `requestRewriter`（请求副本级投影与传输转义，不改存档原文） |
 | 上下文 | 本轮输入、存档状态 | 固定前缀、本轮上下文（世界书、现场状态、Guide 等） | 添加：`promptSection`、`turnSection`、`worldbookSource`、`worldbookEntries`；观察：`getRequestContext`（本轮实际用到的各段） |
-| 生成 | 组装好的请求 | 模型原始回复 | — |
+| 生成 | 组装好的请求 | 模型原始回复 | `requestRewriter`（投影发往模型的请求副本与 `wireEscape`） |
 | 回复 | 模型原始回复 | 保存的正文、显示用的正文 | 浏览器侧：正文标记、媒体渲染；替换显示：`registerTurnView`（正文本身不变） |
 | 结算 | 本轮正文、存档状态 | 现场姿势、变量更新、人物设计 | 添加：`settlementSection`、`settlementTool`，以及插件自己的结算任务 `settlementTask`（结算前、与结算同时、结算后，玩家可排序、开关）；替换：`replaceSettlement`（普通卡的姿势结算） |
 | 候选 | 本轮正文、存档状态 | 下一步行动候选 | 添加：`candidateSection` |

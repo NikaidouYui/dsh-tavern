@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { currentWireEscape, encodeJsonWireUnicode } from './wire-unicode-escape.js'
 
 export const GEMINI_THOUGHT_SIGNATURE_SENTINEL = 'skip_thought_signature_validator'
 export const GEMINI_ALT_THOUGHT_SIGNATURE_SENTINEL = 'context_engineering_is_the_way_to_go'
@@ -494,7 +495,8 @@ export function installToolProtocolFetchPatch(target = globalThis, { quirks = de
     const original = target.fetch
     const replacement = async function patchedToolProtocolFetch(input, init) {
       const directive = directiveStorage.getStore()
-      if (!directive || !init || typeof init.body !== 'string') {
+      const wireEscape = currentWireEscape()
+      if ((!directive && !wireEscape) || !init || typeof init.body !== 'string') {
         return original.call(this, input, init)
       }
       const method = str(init.method || (input && typeof input === 'object' ? input.method : 'GET')).toUpperCase()
@@ -507,6 +509,20 @@ export function installToolProtocolFetchPatch(target = globalThis, { quirks = de
         return original.call(this, input, init)
       }
 
+      const sendWithWireEscape = (fetchThis, fetchInput, fetchInit) => {
+        if (!wireEscape || typeof fetchInit?.body !== 'string') {
+          return original.call(fetchThis, fetchInput, fetchInit)
+        }
+        return original.call(fetchThis, fetchInput, {
+          ...fetchInit,
+          body: encodeJsonWireUnicode(fetchInit.body, wireEscape)
+        })
+      }
+
+      if (!directive) {
+        return sendWithWireEscape(this, input, init)
+      }
+
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : str(input?.url)
       let currentAttempt = enhanceToolProtocolPayload(parsedBody, {
         url,
@@ -516,7 +532,7 @@ export function installToolProtocolFetchPatch(target = globalThis, { quirks = de
       })
 
       if (!currentAttempt.changed) {
-        const res = await original.call(this, input, init)
+        const res = await sendWithWireEscape(this, input, init)
         return isGeminiModelId(parsedBody?.model || directive.model) ? inspectOpenAISseStreamForSignatures(res) : res
       }
 
@@ -529,7 +545,7 @@ export function installToolProtocolFetchPatch(target = globalThis, { quirks = de
           headers: currentAttempt.headers,
           body: JSON.stringify(currentAttempt.body)
         }
-        const response = await original.call(this, input, nextInit)
+        const response = await sendWithWireEscape(this, input, nextInit)
         if (response.status !== 400 || !currentAttempt.changed || attempt === 2) {
           return isGeminiModelId(modelId) && currentAttempt.applied.protocol === 'openai-completions'
             ? inspectOpenAISseStreamForSignatures(response)

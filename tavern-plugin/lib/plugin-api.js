@@ -6,6 +6,7 @@ import { createPluginGameModes } from './domain/plugin-game-mode.js'
 import { createGameModeAgents } from './domain/game-mode-agents.js'
 import { createPluginTaskExecution } from './domain/plugin-task-execution.js'
 import { createBodyGenerationProviders } from './domain/body-generation-providers.js'
+import { createRequestRewriters } from './domain/plugin-request-rewriter.js'
 import { pluginMember, pluginMemberId, registerPluginMember } from './domain/background-members.js'
 import { CUSTOM_EVENT, STORY_EVENTS } from './domain/story-events.js'
 import { bounded, untilAborted } from './domain/plugin-callback.js'
@@ -202,7 +203,7 @@ export function createTavernPluginApi(deps) {
     }
     return name
   }
-  const capabilities = Object.freeze({ gameMode: 1, hostBehavior: 1, controlInput: 1, mvuSettlementProvider: 1, worldbookStrategy: 1, galleryProvider: 1, pricingProvider: 1, imageModels: 1, imageLibrary: 1, bodyGeneration: 1, bodyProjection: 1, stContractService: 1,
+  const capabilities = Object.freeze({ gameMode: 1, hostBehavior: 1, controlInput: 1, mvuSettlementProvider: 1, worldbookStrategy: 1, galleryProvider: 1, pricingProvider: 1, imageModels: 1, imageLibrary: 1, bodyGeneration: 1, bodyProjection: 1, stContractService: 1, requestRewriter: 1,
     ...(deps.generationPresets ? { generationPresets: 1 } : {}),
     ...(deps.decisionJudge ? { decisionJudge: 1 } : {}),
     ...(deps.narrativeDamper ? { narrativeDamper: 1 } : {}) })
@@ -314,6 +315,18 @@ export function createTavernPluginApi(deps) {
     const message = String(error?.message || error).slice(0, 500)
     log.warn?.('dsh-tavern: 插件 ' + owner + ' 在「' + stage + '」出错: ' + message)
   }
+
+  const requestRewriters = createRequestRewriters({
+    allowed: async (owner, gameId) => {
+      try {
+        await guardScope(owner, { gameId })
+        return !(await choicesFor(gameId)).disabled.has(owner)
+      } catch {
+        return false
+      }
+    },
+    recordError
+  })
 
   const imageCatalog = createPluginImageCatalog({ imageProviders, reportError: recordError,
     available: async (owner, context) => {
@@ -616,6 +629,13 @@ export function createTavernPluginApi(deps) {
       if (typeof plan !== 'function' || typeof rewrite !== 'function') throw new TypeError('replyRewriter 需要 plan 与 rewrite 两个函数')
       if (!deps.replyStreamRewriters) throw new Error('宿主没有正文流式改写能力，请更新酒馆本体')
       return owned(this, () => deps.replyStreamRewriters.register(owner, { plan, rewrite }), 'tavern.replyRewriter()')
+    },
+
+    // 请求改写：在投影与模板处理完成后、写入请求日志与发往模型前，无副作用地投影请求体（如输入转义、防路由清洗）。
+    requestRewriter({ rewrite } = {}) {
+      const owner = ownerOf(this)
+      if (typeof rewrite !== 'function') throw new TypeError('requestRewriter 需要 rewrite 函数')
+      return owned(this, () => requestRewriters.register(owner, { rewrite }), 'tavern.requestRewriter()')
     },
 
     // The image plugin's gates (its optional host hooks): it plans a settled turn once beforeImagePlan returns, and draws a
@@ -2360,7 +2380,7 @@ export function createTavernPluginApi(deps) {
     return results.sort((a, b) => (order.get(a.versionId) ?? 0) - (order.get(b.versionId) ?? 0))
   }
 
-  return Object.freeze({ resolveReadCapability, hostBehavior, gameModes, bodyGenerators, taskCatalog, service, mvuProvider, mvuProviderActive, mvuProviderRegistered, capabilities, toolModesFor, toolSkillsFor, toolNetworkFor: name => toolNetworks.get(name)?.capability, callHandler, turnState, exportGame, importGame, turnSettled, castAnnotated, castAssetSources, gameRemoved, mediaRemoved, onPictureReady, imageGates, collectDamperQuestions,
+  return Object.freeze({ resolveReadCapability, hostBehavior, gameModes, bodyGenerators, requestRewriters, taskCatalog, service, mvuProvider, mvuProviderActive, mvuProviderRegistered, capabilities, toolModesFor, toolSkillsFor, toolNetworkFor: name => toolNetworks.get(name)?.capability, callHandler, turnState, exportGame, importGame, turnSettled, castAnnotated, castAssetSources, gameRemoved, mediaRemoved, onPictureReady, imageGates, collectDamperQuestions,
     listGalleryProviderItems, readGalleryProviderImage, removeGalleryProviderItems,
     // The asset library's access to the 配图 人物库 records (registerImageLibrary schema 4); outside any card.
     imageCharacters: (op, input) => imageCatalog.record(op, {}, input),

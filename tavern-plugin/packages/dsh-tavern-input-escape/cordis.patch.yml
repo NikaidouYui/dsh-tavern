@@ -1,0 +1,6 @@
+plugins:
+  - group: true
+    entries:
+    - id: dsh-tavern-input-escape
+      name: dsh-tavern-input-escape
+      config: {}

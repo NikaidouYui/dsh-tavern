@@ -122,10 +122,15 @@ export async function failureResilienceChecks({ page, step, savedChat, output, r
     await pause(6000)
   }, { forbidden: ['E2E_CONTENT_FILTER'] })
 
-  await survive('正文写到一半被拦截掐断', async () => {
+  await survive('正文写到一半被拦截掐断（保留已生成正文）', async () => {
+    const before = (await rounds()).length
     await composer().fill('E2E_FILTER_MIDSTREAM 继续'); await composer().press('Enter')
-    await pause(8000)
-  }, { forbidden: ['E2E_FILTER_MIDSTREAM', '你推开酒馆的门，她抬起头，'] })
+    assert.equal(await waitRounds(before + 1, 20), before + 1, '流式已输出的正文不应被撤销')
+    await settled()
+    const kept = (await rounds()).at(-1)
+    assert.match(kept?.text || '', /你推开酒馆的门，她抬起头，/)
+    assert.equal(kept?.incomplete, true)
+  })
 
   await survive('正文生成中手动停止', async () => {
     await composer().fill('E2E_SLOW 继续'); await composer().press('Enter')

@@ -8,7 +8,6 @@ import { installPrefixBoundReasoningProjection } from '../domain/prefix-bound-re
 import { installWorkspaceInstructionPresentation } from '../domain/workspace-instruction-presentation.js'
 import { presentModelError } from '../domain/model-error-presentation.js'
 import { markRequestHandled, requestHandledBy } from '../domain/request-lineage.js'
-import { bodyGenerationFailure } from '../domain/body-generation-failure.js'
 import { toolProtocolDirectiveOf } from '../domain/foreground-orchestration-strategies.js'
 import { STORY_CONTEXT_TOOL_NAME, STORY_SUBMIT_TOOL_NAME } from '../domain/story-tool-submission.js'
 import { isAutoToolOnlyModel, runWithToolProtocolDirective } from '../domain/tool-protocol-enforcement.js'
@@ -211,19 +210,17 @@ export function registerModelStreamHooks({
       let toolStreamedText = ''
       const toolReplyTracker = createToolReplyStreamTracker(STORY_SUBMIT_TOOL_NAME)
       // A provider can end after emitting visible prose with finish_reason=error,
-      // or drop the terminal chunk altogether. The host normally records only an
-      // assistant/attempt for those turns, and the failed-turn cleanup then removes
+      // content_filter, or drop the terminal chunk altogether. The host normally records
+      // only an assistant/attempt for those turns, and the failed-turn cleanup then removes
       // the story placeholder: the player watches a reply vanish after it streamed.
-      // Let the ordinary max-tokens path commit that visible prefix instead. Content
-      // moderation is deliberately excluded; its interrupted text stays discarded.
+      // Let the ordinary max-tokens path commit that visible prefix instead.
       const preservePartial = !backgroundContext && !child && options.purpose === undefined && ['story', 'script'].includes(chat?.mode)
+      const hasBodyText = () => responseText.trim() !== '' || toolStreamedText.trim() !== ''
       function recoveredFinish(reason) {
-        if (!preservePartial || responseText.trim() === '' || options.signal?.aborted) return null
+        if (!preservePartial || !hasBodyText() || options.signal?.aborted) return null
         const kind = typeof reason?.kind === 'string' ? reason.kind : ''
-        if (kind === 'aborted' || kind === 'content-filter') return null
-        const failure = reason?.failure || reason?.error || reason
-        if (bodyGenerationFailure(failure).category === 'content-filter') return null
-        return { kind: 'max-tokens', recoveredFrom: kind === 'error' ? 'error' : 'interrupted' }
+        if (kind === 'aborted') return null
+        return { kind: 'max-tokens', recoveredFrom: kind === 'error' || kind === 'content-filter' ? kind : 'interrupted' }
       }
       // Optional observers initialize independently; they never hold up model tokens.
       const replyObserver = openReplyObservers?.({signal:options.signal, sessionId:ownerSessionId,
@@ -246,6 +243,14 @@ export function registerModelStreamHooks({
       let finish = null, usage = null
       // 改写补出来的 text-delta 要沿用同一段正文的 index，assembler 靠它把 token 并进同一个正文块。
       let rewriteIndex = null
+      async function drainRewriteStream() {
+        if (!rewriteStream) return null
+        const rest = await rewriteStream.drain()
+        if (!rest) return null
+        responseText += rest
+        if (!activeDirective?.storyOutputToolCall) replyObserver?.append(rest)
+        return { type: 'text-delta', ...(rewriteIndex === null ? {} : { index: rewriteIndex }), text: rest }
+      }
       let failure = null, interrupted = false
       const liveness = createModelStreamProgress({signal:options.signal})
       let iterator, exhausted = false
@@ -273,12 +278,8 @@ export function registerModelStreamHooks({
           }
           if (chunk && chunk.type === 'finish' && rewriteStream) {
             // 收尾段也要改写后才能发 finish，否则前端会把最后一段当新消息接在后面。
-            const rest = await rewriteStream.drain()
-            if (rest) {
-              responseText += rest
-              if (!activeDirective?.storyOutputToolCall) replyObserver?.append(rest)
-              yield { type: 'text-delta', ...(rewriteIndex === null ? {} : { index: rewriteIndex }), text: rest }
-            }
+            const drained = await drainRewriteStream()
+            if (drained) yield drained
           }
           if (chunk && chunk.type === 'tool-call-delta') {
             const extracted = toolReplyTracker.pushToolDelta(chunk)
@@ -289,7 +290,7 @@ export function registerModelStreamHooks({
           }
           if (chunk && chunk.type === 'finish') {
             const reason = chunk.reason === undefined ? chunk : chunk.reason
-            const recovered = reason?.kind === 'error' ? recoveredFinish(reason) : null
+            const recovered = reason?.kind === 'error' || reason?.kind === 'content-filter' ? recoveredFinish(reason) : null
             if (recovered) {
               chunk = chunk.reason === undefined ? { ...chunk, ...recovered } : { ...chunk, reason: recovered }
               finish = recovered
@@ -302,12 +303,8 @@ export function registerModelStreamHooks({
         }
         if (rewriteStream) {
           // 没有 finish（中断/空流）时把缓冲里的正文放出来；已 drain 过就是空串。
-          const rest = await rewriteStream.drain()
-          if (rest) {
-            responseText += rest
-            if (!activeDirective?.storyOutputToolCall) replyObserver?.append(rest)
-            yield { type: 'text-delta', ...(rewriteIndex === null ? {} : { index: rewriteIndex }), text: rest }
-          }
+          const drained = await drainRewriteStream()
+          if (drained) yield drained
         }
         if (!finish || finish.kind === 'aborted') {
           const recovered = !finish ? recoveredFinish(null) : null
@@ -317,6 +314,16 @@ export function registerModelStreamHooks({
           } else throw Object.assign(new Error('模型流已中断，未收到完整结束标记。'), {code:'MODEL_STREAM_INTERRUPTED'})
         }
       } catch (error) {
+        if (!finish && preservePartial && !options.signal?.aborted && error?.code !== 'MODEL_STREAM_ABORTED' && error?.name !== 'AbortError') {
+          const drained = await drainRewriteStream().catch(() => null)
+          if (drained) yield drained
+          const recovered = recoveredFinish({ kind: 'error', error })
+          if (recovered) {
+            finish = recovered
+            yield { type: 'finish', reason: recovered }
+            return
+          }
+        }
         interrupted = /^MODEL_STREAM_/.test(error?.code || '')
         const displayedError = chat ? presentModelError(error) : error
         failure = str(displayedError && displayedError.message || displayedError)

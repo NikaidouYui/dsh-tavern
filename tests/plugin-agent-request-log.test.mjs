@@ -155,16 +155,54 @@ test('the real model-stream hook keeps foreground story text when a provider end
   assert.equal(beginnings.length, 1)
 })
 
-test('内容审核掐断仍走失败清理，不把被拦截的半截正文当成完整回复', async () => {
-  let cancelled = 0
-  const begin = () => ({ update() {}, cancel: () => cancelled++, discard() {} })
-  const send = install(memoryLog(), {}, null, begin, async function * () {
-    yield { type: 'text-delta', text: '被审核掐断的半截正文' }
+test('内容审核掐断时保留流式已输出的正文，不再撤销；未输出正文时仍走失败清理', async () => {
+  for (const reason of [
+    { kind: 'error', failure: { message: 'Provider finish_reason: content_filter', code: 'PI_AI_ERROR' } },
+    { kind: 'content-filter', failure: { message: 'Provider finish_reason: content_filter', code: 'CONTENT_FILTER' } }
+  ]) {
+    let shown = '', cancelled = 0
+    const begin = () => ({ update: text => { shown = text }, cancel: () => cancelled++, discard() {} })
+    const send = install(memoryLog(), {}, null, begin, async function * () {
+      yield { type: 'text-delta', text: '被审核掐断的半截正文' }
+      yield { type: 'finish', reason }
+    })
+    const chunks = await send('session-game')
+    assert.equal(chunks.at(-1).reason.kind, 'max-tokens')
+    assert.equal(chunks.at(-1).reason.recoveredFrom, reason.kind)
+    assert.equal(shown, '被审核掐断的半截正文')
+    assert.equal(cancelled, 0)
+  }
+
+  let toolShown = '', toolCancelled = 0
+  const toolSend = install(memoryLog(), {}, null, () => ({ update: text => { toolShown = text }, cancel: () => toolCancelled++, discard() {} }), async function * () {
+    yield { type: 'tool-call-delta', index: 0, id: 'c1', name: 'submit_story', argumentsDelta: '{"content":"工具流式半截正文' }
     yield { type: 'finish', reason: { kind: 'error', failure: { message: 'Provider finish_reason: content_filter', code: 'PI_AI_ERROR' } } }
   })
-  const chunks = await send('session-game')
-  assert.equal(chunks.at(-1).reason.kind, 'error')
-  assert.equal(cancelled, 1)
+  const toolChunks = await toolSend('session-game')
+  assert.equal(toolChunks.at(-1).reason.kind, 'max-tokens')
+  assert.equal(toolShown, '工具流式半截正文')
+  assert.equal(toolCancelled, 0)
+
+  let throwShown = '', throwCancelled = 0
+  const throwSend = install(memoryLog(), {}, null, () => ({ update: text => { throwShown = text }, cancel: () => throwCancelled++, discard() {} }), async function * () {
+    yield { type: 'text-delta', text: '异常中断前的正文' }
+    throw new Error('Provider finish_reason: content_filter')
+  })
+  const throwChunks = await throwSend('session-game')
+  assert.equal(throwChunks.at(-1).type, 'finish')
+  assert.equal(throwChunks.at(-1).reason.kind, 'max-tokens')
+  assert.equal(throwChunks.at(-1).reason.recoveredFrom, 'error')
+  assert.equal(throwShown, '异常中断前的正文')
+  assert.equal(throwCancelled, 0)
+
+  let emptyCancelled = 0
+  const emptySend = install(memoryLog(), {}, null, () => ({ update() {}, cancel: () => emptyCancelled++, discard() {} }), async function * () {
+    yield { type: 'reasoning-delta', text: '只有思考没有正文' }
+    yield { type: 'finish', reason: { kind: 'error', failure: { message: 'Provider finish_reason: content_filter', code: 'PI_AI_ERROR' } } }
+  })
+  const emptyChunks = await emptySend('session-game')
+  assert.equal(emptyChunks.at(-1).reason.kind, 'error')
+  assert.equal(emptyCancelled, 1)
 })
 
 test('a plugin settlement reports which plugin is settling and whether its agent is producing output', async () => {

@@ -147,9 +147,6 @@ export function apply(ctx) {
       // Poisoned history: a committed round's content trips the filter on every later request.
       if (!tools.has('mvu_submit_update') && !tools.has('candidate_submit_choices') && !tools.has('posture_submit')
         && JSON.stringify(input.messages).includes('E2E_POISON') && !latestInput.includes('E2E_POISON')) {
-        yield { type: 'block-start', index: 0, blockType: 'text' }
-        yield { type: 'text-delta', index: 0, text: '<content>\n她抬起头，' }
-        await new Promise(resolve => { const timer = setTimeout(resolve, 1500); input.signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true }) })
         yield { type: 'finish', reason: { kind: 'error', failure: { message: 'Provider finish_reason: content_filter', code: 'PI_AI_ERROR' } } }
         return
       }

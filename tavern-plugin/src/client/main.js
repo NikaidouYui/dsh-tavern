@@ -22,12 +22,10 @@ window.__ModuleLoader__.load({
 		// @include wait-lines.js
 		// @include jump-latest.js
 		// @include inline-field.js
-		// @include spine-runtime-entry.js
-        // @include pixi-runtime.js
 		// @include image-viewer.js
 		// @include data-picker.js
 		// @include mod-config-ui.js
-
+		// @include spine-runtime-entry.js
 
 		// `dsh-tavern-shell-active` gates every Tavern rule that touches host chrome.
 		// It used to be added only when the left sidebar mounted. On a phone that
@@ -147,8 +145,11 @@ window.__ModuleLoader__.load({
 		}
 
 		async function importTavernCardSelection(picked, call, { cardZip, onProgress, onTransfer } = {}) {
-			const { cards, zips } = cardZip ? await splitCardFiles(picked) : { cards: picked, zips: [] };
 			const failures = [], notices = [];
+			const misplaced = picked.filter(function (file) { return misplacedFileHint(file, false); });
+			for (const file of misplaced) failures.push({ name: file.name, plain: true, message: misplacedFileHint(file, false) });
+			picked = picked.filter(function (file) { return misplaced.indexOf(file) < 0; });
+			const { cards, zips } = cardZip ? await splitCardFiles(picked) : { cards: picked, zips: [] };
 			let imported = 0, existing = 0, lastPath = "";
 			for (const [index, file] of cards.entries()) {
 				onProgress?.("正在导入 " + (index + 1) + "/" + cards.length + "：" + file.name);
@@ -178,9 +179,17 @@ window.__ModuleLoader__.load({
 				+ (existing ? "，" + existing + " 张已在卡库中" : "")
 				+ (failures.length ? "，" + failures.length + " 个文件失败" : "") : "";
 			if (failures.length) notices.unshift("失败文件：" + failures.map(file => file.name).join("、"));
-			return { lastPath, failures: failures.map(file => file.name + "：" + file.message), summary: [summary, ...notices].filter(Boolean).join("\n") };
+			return { lastPath, failures: failures.map(file => file.plain ? file.message : file.name + "：" + file.message), summary: [summary, ...notices].filter(Boolean).join("\n") };
 		}
 
+		// A save or chat log picked in 「导入人物卡」 (and a card in 「导入存档」, sidebar.js) is told where it belongs, in one plain line.
+		function misplacedFileHint(file, wantsSave) {
+			const name = String(file && file.name || "").toLowerCase();
+			if (wantsSave) return /\.(png|json|charx|dshcard|zip)$/.test(name) ? "这是人物卡文件，不是存档。请关闭后点「导入人物卡」导入。" : "";
+			if (name.endsWith(".dshsave") || name.endsWith(".jsonl")) return "这是存档或聊天记录，不是人物卡。请改用「导入存档」导入。";
+			if (name.endsWith(".dshtransfer")) return "这是备份包，不是人物卡。请在侧栏「导出与导入」里导入。";
+			return "";
+		}
 		// No file filter on card import: macOS file dialogs (Chrome, Safari) grey out .dshcard and
 		// .charx however the accept list names them, since the system knows no type for them.
 		// The import checks the format and says what it accepts.
@@ -294,6 +303,7 @@ window.__ModuleLoader__.load({
 		function MobileCardImportButton(props) {
 			const [catalog, setCatalog] = React.useState(null);
 			const [open, setOpen] = React.useState(false);
+			useWindowFullscreen(open); // the import sheet covers the window (inline-field.js)
 			const [busy, setBusy] = React.useState(false);
 			const [error, setError] = React.useState("");
 			const [filter, setFilter] = React.useState("");
@@ -511,8 +521,9 @@ window.__ModuleLoader__.load({
 				}
 			}
 			const runtimeControl = ["claimTavernScriptWork", "startTavernScriptWork", "getTavernScriptWorkState", "heartbeatTavernScriptRuntime", "completeTavernHelperEvent", "releaseTavernHelperRuntime"].includes(method);
-            // Keep stage reads on authenticated HTTP; the upstream mux only declares script controls.
-			const controlChannel = runtimeControl && typeof tavernSessionSignals !== "undefined" && typeof tavernSessionSignals.control === "function" ? tavernSessionSignals : null;
+            // Only reads ride the mux: getStageDirection without readOnly may run and save the director, so it stays on HTTP.
+            const multiplexedRead = ['getStageModHistory', 'getDialogueBubbles'].includes(method) || method === 'getStageDirection' && args?.readOnly === true;
+			const controlChannel = (runtimeControl || multiplexedRead) && typeof tavernSessionSignals !== "undefined" && typeof tavernSessionSignals.control === "function" ? tavernSessionSignals : null;
 			const started = Date.now();
             const clockStart = performance.now();
             const roundKey = method + ':' + (sessionId || args?.sessionId || '');
@@ -542,6 +553,7 @@ window.__ModuleLoader__.load({
 			if (sessionId) payload.sessionId = sessionId;
 			const viewRead = method === "getSession" ? beginSessionViewRead(payload.sessionId) : null;
 			if (viewRead) { payload.viewSync = 1; payload.resourceSync = 1; payload.helperWorldbookSync = 1; payload.openingWindow = 1; if (historyFromSessions.has(payload.sessionId)) payload.historyFrom = historyFromSessions.get(payload.sessionId); payload.viewCursor = viewRead.cursor; if (viewRead.receiptSync) payload.receiptSync = 1; }
+			if (method === "getStoryTranscript") { payload.resourceSync = 1; payload.helperWorldbookSync = 1; }
 			if (method === "getTavernHelperContext" && !payload.eventId && !payload.fullView) payload.openingWindow = 1;
 			const requestBody = JSON.stringify(payload);
 			if (trace) {
@@ -579,7 +591,8 @@ window.__ModuleLoader__.load({
                 return result;
                 });
             };
-            // Projections retain their HTTP authority and origin-bound media lease checks.
+            // The authenticated Remote mux carries slow reads without HTTP/1.1 slots.
+            // Projections mint origin-bound media leases, so retain their HTTP authority checks.
             const responsePromise = controlChannel
                 ? Promise.resolve().then(() => controlChannel.control(method, JSON.parse(requestBody), requestOptions && requestOptions.signal))
                 : ['getAssetPackPresentation', 'getStagePhonePresentation'].includes(method)
@@ -977,7 +990,6 @@ window.__ModuleLoader__.load({
 // @include features/reply-observer.js
 
 // @include features/speech.js
-// @include features/read-aloud.js
 
 // @include features/music.js
 
@@ -992,6 +1004,7 @@ window.__ModuleLoader__.load({
 // @include features/story-transcript-data.js
 // @include modules/story-external-history.js
 // @include host/chat-flow.js
+// @include modules/turn-rail.js
 // @include features/story-transcript-list.js
 
 // @include features/card-list.js
@@ -1045,7 +1058,6 @@ window.__ModuleLoader__.load({
 // @include features/conversation-header.js
 // @include-domain play-interaction-flow.js
 // @include features/play-interaction-panels.js
-// @include modules/turn-rail.js
 // @include features/play-controls.js
 
 // @include features/request-context.js
@@ -1068,8 +1080,6 @@ function clipReplayCore() {
 
 		const storyTranscriptFeature = createTavernStoryTranscriptFeature({
 			replyActions: {
-				useReadAloudState: useTavernReadAloudState,
-				ReadAloud: TavernReplyReadAloudAction,
 				Receipt: playControlsFeature.TurnReceiptButton,
 				Latest: playControlsFeature.LatestReplyActions,
 				RollbackTo: playControlsFeature.RollbackToTurnButton,
@@ -1150,6 +1160,9 @@ function clipReplayCore() {
 			// with "Failed to load plugins".
 			tavernUiExtensions.service.ctx = ctx;
 			tavernUiExtensions.attachHost(ctx);
+			tavernUiExtensions.attachPanelOpener(function (tabId, sessionId) {
+				return openTavernSidebarTab(ctx, { type: tabId }, { sessionId: sessionId });
+			});
 			if (typeof ctx.provide === "function") ctx.provide("tavernUi", tavernUiExtensions.service);
 			// The asset workbench is a plain render endpoint this plugin owns (the library tab body).
 			// Provide it here as well: `dsh-asset-library` injects it, and when only the play session

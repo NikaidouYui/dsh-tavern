@@ -11,10 +11,11 @@ const TEST_FORK_REPO = 'NikaidouYui/dsh-tavern'
 
 test('rewriteContent 与 restoreUpstreamContent 对所有目标文件完全可逆', async () => {
   for (const file of TARGET_FILES) {
-    const original = await readFile(path.join(REPO_ROOT, file), 'utf8')
-    const rewritten = rewriteContent(file, original, TEST_FORK_REPO, DEFAULT_UPSTREAM_REPO)
+    const raw = await readFile(path.join(REPO_ROOT, file), 'utf8')
+    const upstreamForm = restoreUpstreamContent(file, raw, TEST_FORK_REPO, DEFAULT_UPSTREAM_REPO)
+    const rewritten = rewriteContent(file, upstreamForm, TEST_FORK_REPO, DEFAULT_UPSTREAM_REPO)
     const restored = restoreUpstreamContent(file, rewritten, TEST_FORK_REPO, DEFAULT_UPSTREAM_REPO)
-    assert.equal(restored, original, `文件 ${file} 还原后应与原内容完全一致`)
+    assert.equal(restored, upstreamForm, `文件 ${file} 还原后应与上游形态完全一致`)
   }
 })
 
@@ -26,7 +27,8 @@ test('rewriteRepository 精确替换仓库引用并保留 Wiki/官网/APK/stable
     const source = path.join(REPO_ROOT, file)
     const target = path.join(tempRoot, file)
     await mkdir(path.dirname(target), { recursive: true })
-    await cp(source, target)
+    const raw = await readFile(source, 'utf8')
+    await writeFile(target, restoreUpstreamContent(file, raw, TEST_FORK_REPO, DEFAULT_UPSTREAM_REPO), 'utf8')
   }
 
   const firstRun = await rewriteRepository({ root: tempRoot, targetRepo: TEST_FORK_REPO })

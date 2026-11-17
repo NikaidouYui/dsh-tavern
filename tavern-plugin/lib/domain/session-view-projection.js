@@ -12,7 +12,6 @@ import { composeTavernRegexScripts } from './card-extension-reading.js'
 import { applyRegexOverrides } from './regex-manager.js'
 import { projectCharacterDesignDocument } from './character-design-document.js'
 import { readLedger } from './story-ledger.js'
-import { isPlotCompassEnabled, readPlotCompass } from './plot-compass.js'
 import { TAVERN_COMPATIBILITY_CAPABILITIES } from './tavern-compatibility-diagnostics.js'
 import { assistantResultForTurn } from './session-turn-result.js'
 import { forkTurnsByMessageId as forkTargetsFromSession } from './conversation-fork-targets.js'
@@ -32,7 +31,7 @@ export const sessionViewMessageFields = Object.freeze([
   'sourceText', 'projectionText', 'text', 'displayText', 'displayMode', 'projectionVersion', 'projectionWarnings',
   // Sidebar origin uses frame receipts, not the external DOM/console capture.
   'displayRuntime.frames',
-  'stagePageVersion', 'openingChoiceId', 'openingSelectionRevision', 'swipeId', 'swipes', 'variables', 'tavernPluginData', 'mvu', 'narrativeDamper', 'damperState',
+  'stagePageVersion', 'openingChoiceId', 'openingSelectionRevision', 'voiceBackfill', 'swipeId', 'swipes', 'variables', 'tavernPluginData', 'mvu', 'narrativeDamper', 'damperState',
   'native', 'nativeAnchor', 'placeholder', 'bodyEdit', 'bodyRegenerationProcessed', 'bodyHostRegexApplied', 'bodyPluginProjection', 'importSource', 'templateHistoryEdit', 'templateInputSource'
 ])
 
@@ -43,7 +42,7 @@ export function createSessionViewProjection({
   readChanges, scheduleTemplateSync, warmCandidates, requestPerformance, readTavernSettings, readScript,
   scriptContinuity, groupOfMode, tavernExtensionSettings, readCardExtensions, tavernRemoteAssets,
   liveCardUpdate, activityOf, cardUpdateStatus, agentRegistry, str, sessionResources, worldBooks,
-  sessionDebugEvidence, cardViewOf, projectLedgerTask, projectCharacterDesignTask, projectPlotCompassTask = () => null, projectPhoneChat,
+  sessionDebugEvidence, cardViewOf, projectLedgerTask, projectCharacterDesignTask, projectPhoneChat,
   readPromptTemplateGlobalVariables, sessionStore, readChatCard, workspaceViewOf, helperHistoryAccess,
   readLiveCardStage = async () => null, stageReadScope = () => false, readStageChat,
   readCardStageMode = async () => NO_STAGE
@@ -232,9 +231,6 @@ export function createSessionViewProjection({
       styleReferenceEnabled: chat.backgroundTasks?.styleReference === true && (chat.mode || 'story') === 'story',
       ledger: readLedger(chat.ledger),
       ledgerTask: projectLedgerTask(chat),
-      plotCompass: readPlotCompass(chat.plotCompass),
-      plotCompassEnabled: isPlotCompassEnabled(chat),
-      plotCompassTask: projectPlotCompassTask(chat),
       characterDesigns: projectCharacterDesignDocument(chat.characterDesignDocument),
       characterDesignTask: projectCharacterDesignTask(chat),
       guides: Array.isArray(chat.guides) ? chat.guides : [],
@@ -472,9 +468,6 @@ export function createSessionViewProjection({
     const fields = sessionStateView.volatile(chat, activity, changes)
     return { ...fields, ...streamingRegenerationFields(chat), statusBarPlacement: (await readTavernSettings()).defaultPlaySettings?.statusBarPlacement === 'body' ? 'body' : 'sidebar', forkTurnsByMessageId: forkTurnsForChat(chat), userInputEdits: userInputEditsOf(chat), editableUserInputTurns: editableUserInputTurnsForChat(chat), latestCommittedUserTurn: latestCommittedUserTurnForChat(chat), failedUserInputTurns: failedUserInputTurnsForChat(chat),
       cardSave: cardSaveViewOf(chat),
-      plotCompass: readPlotCompass(chat.plotCompass),
-      plotCompassEnabled: isPlotCompassEnabled(chat),
-      plotCompassTask: projectPlotCompassTask(chat),
       ...transcriptPlanFields(chat, sessionDebugEvidence(chat.sessionId), fields.replacingDshTurns, fields.keptInputTurns) }
   }
 
@@ -518,13 +511,12 @@ export function createSessionViewProjection({
       // Header state a background task rewrites without touching any message.
       ledger: readLedger(chat.ledger),
       ledgerTask: projectLedgerTask(chat),
-      plotCompass: readPlotCompass(chat.plotCompass),
-      plotCompassEnabled: isPlotCompassEnabled(chat),
-      plotCompassTask: projectPlotCompassTask(chat),
       characterDesigns: projectCharacterDesignDocument(chat.characterDesignDocument),
       characterDesignTask: projectCharacterDesignTask(chat),
       ...latestTurnFields(chat)
     })
+    // The banner lasts until the next turn: recompute it from the new latest turn.
+    next.cardAutoReload = chat.cardAutoReload && Number(chat.cardAutoReload.turn) === next.latestAssistantTurn ? { at: chat.cardAutoReload.at } : null
     if (mode === 'script') next.scriptProgress = await scriptProgressOf(chat)
     Object.assign(next,inputFieldsProjection.project(chat,{baseRevision:changes.baseRevision,indices:dirtyMessageIndices,changedHeaderFields,runtimeInputChanges}))
     if (previous.tavernHelper) {

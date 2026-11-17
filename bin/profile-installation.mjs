@@ -26,6 +26,7 @@ import { patchPiAiVertexStream, resolveVertexProject } from './pi-ai-vertex-stre
 import { patchWebViewportMeta } from './web-viewport-patch.mjs'
 import { installPluginDependencies, resolveHostAnchor, resolveHostDependencies } from './plugin-dependencies.mjs'
 import { installBundledSceneImagePlugin } from './bundled-scene-image-plugin.mjs'
+import { installBundledTavernPlugins } from './bundled-tavern-plugins.mjs'
 import { isAsarPath } from './desktop-host-paths.mjs'
 import { repairDirectoryLinksSync } from './portable-fs.mjs'
 import { migrateLegacyTavernData, resolveTavernDataRoot } from '../tavern-plugin/lib/domain/tavern-data.js'
@@ -66,11 +67,11 @@ function verifySource() {
   }
 }
 
-function prepareProfileConfiguration(host, dshVersion) {
-  const source = JSON.parse(readFileSync(path.join(SOURCE_ROOT, 'package.json'), 'utf8'))
-  const current = loadProfileManifest({ profileDir: PROFILE_DIR })
+export function prepareProfileConfiguration(host, dshVersion, { sourceRoot = SOURCE_ROOT, profileDir = PROFILE_DIR, dshHome = DSH_ROOT } = {}) {
+  const source = JSON.parse(readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'))
+  let current = loadProfileManifest({ profileDir })
   const desktop = host === 'desktop' || host === 'next'
-  const legacyNext = desktop && hasNextTavern(DSH_ROOT)
+  const legacyNext = desktop && hasNextTavern(dshHome)
   if (desktop && current.dsh?.profile?.bundles?.includes('dsh-tavern-bundle') && !legacyNext) {
     throw new Error('无法核对现有 NEXT 酒馆包的来源，请先检查 tavern Profile。')
   }
@@ -78,29 +79,29 @@ function prepareProfileConfiguration(host, dshVersion) {
     throw new Error(`目标 profile 已属于其他项目：${current.name}`)
   }
 
-  const pluginPath = path.join(SOURCE_ROOT, 'tavern-plugin')
+  const pluginPath = path.join(sourceRoot, 'tavern-plugin')
   const manifest = mergeProfileManifest({
     source,
     current,
     previousLaunchers: [
-      ...launcherBundles(current, PROFILE_DIR, 'desktop'),
-      ...launcherBundles(current, PROFILE_DIR, 'next'),
+      ...launcherBundles(current, profileDir, 'desktop'),
+      ...launcherBundles(current, profileDir, 'next'),
       ...(legacyNext ? ['dsh-tavern-bundle'] : []),
     ],
     pluginPath,
-    dataRoot: resolveTavernDataRoot({ dshHome: DSH_ROOT }),
+    dataRoot: resolveTavernDataRoot({ dshHome }),
     host,
     dshVersion,
   })
   let patchText = prepareProfilePatch({
-    profileDir: PROFILE_DIR,
-    templateText: readFileSync(path.join(SOURCE_ROOT, 'cordis.patch.yml'), 'utf8'),
-    legacyManagedText: readFileSync(path.join(SOURCE_ROOT, 'config', 'legacy-profile-patch-v0.6.yml'), 'utf8'),
+    profileDir,
+    templateText: readFileSync(path.join(sourceRoot, 'cordis.patch.yml'), 'utf8'),
+    legacyManagedText: readFileSync(path.join(sourceRoot, 'config', 'legacy-profile-patch-v0.6.yml'), 'utf8'),
     host,
     profileConfigurationVersion: current.dshTavern && current.dshTavern.profileConfigurationVersion,
   })
   if (desktop) {
-    assertLauncherSlotAvailable(current, PROFILE_DIR, { replaceNext: true })
+    assertLauncherSlotAvailable(current, profileDir, { replaceNext: true })
     manifest.dshTavern.officialDesktop = true
     manifest.dshTavern.profileBridge = true
     if (!manifest.dsh.profile.bundles.includes(LAUNCHER_BUNDLE)) manifest.dsh.profile.bundles.push(LAUNCHER_BUNDLE)
@@ -380,6 +381,17 @@ async function installProfileOwned(host, { attemptId, runInstall, runDsh, guiRoo
     }
     const configuration = prepareProfileConfiguration(host, dshVersion)
     prepared?.prepareManifest(configuration.manifest)
+
+    // 带「酒馆插件」身份的内置插件（剧情罗盘）装进 plugins/ 目录：插件页据此列出、可停用，也随酒馆
+    // 更新。判定「profile 里还有同名包」用刚算出来的清单，而不是磁盘上的 node_modules —— 从旧版本升上来时
+    // 依赖是这次 pnpm install 才摘掉的，看磁盘会永远让位、插件永远装不上。
+    for (const bundled of installBundledTavernPlugins({
+      sourceRoot: SOURCE_ROOT, dataRoot, profileDependencies: configuration.manifest.dependencies || {},
+    })) {
+      if (bundled.action === 'installed') console.log(`已内置插件 ${bundled.packageName} ${bundled.version}：${bundled.target}`)
+      else if (bundled.action === 'upgraded') console.log(`已把内置插件 ${bundled.packageName} 从 ${bundled.installedVersion} 更新到 ${bundled.version}`)
+      else console.log('内置插件 ' + bundled.packageName + '：' + (bundled.reason || bundled.action))
+    }
     const transaction = await beginProfileConfigurationUpdate({
       profileDir,
       manifest: configuration.manifest,

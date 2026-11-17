@@ -1,6 +1,6 @@
 /** Candidate and regeneration interaction state, independent of React and the host composer. */
 function panelMessageKey(value) { return String(value == null ? "" : value); }
-function createPlayInteractionFlow({ rpc, coordinationView, coordination, applyBodyResult, reportError, notifyRegenerating = function () {}, timers = globalThis }) {
+function createPlayInteractionFlow({ rpc, coordinationView, coordination, applyBodyResult, reportError, bodyErrorText = error => String(error?.message || error), notifyRegenerating = function () {}, timers = globalThis }) {
     function store(normalize = value => value) {
         let value = null;
         const listeners = new Set();
@@ -116,14 +116,11 @@ function createPlayInteractionFlow({ rpc, coordinationView, coordination, applyB
             try {
                 const result = await rpc("regenBody", Object.assign({ guidance: text }, restyle ? { restyle: true, styleGuidance: text } : {}), panel.sessionId);
                 applyBodyResult(panel.sessionId, result.view, panel.tail);
-                // A truncated attempt keeps the text it did write; say so instead of
-                // letting the shortened body pass for a finished reply.
-                if (result && result.view && result.view.regenerationWarning) reportError("重新生成提示", new Error(result.view.regenerationWarning));
-                if (candidates.getSnapshot() === candidate) candidates.set(null);
+                if (!result?.view?.aborted && candidates.getSnapshot() === candidate) candidates.set(null);
                 if (regeneration.getSnapshot() === loading) regeneration.set(null);
             } catch (error) {
                 reportError("正文重新生成", error);
-                if (regeneration.getSnapshot() === loading) regeneration.set({ ...panel, phase: "error", error: String(error?.message || error) });
+                if (regeneration.getSnapshot() === loading) regeneration.set({ ...panel, phase: "error", error: bodyErrorText(error) });
             } finally { notifyRegenerating(panel.sessionId, false); }
         });
     }
@@ -149,8 +146,7 @@ function createPlayInteractionFlow({ rpc, coordinationView, coordination, applyB
                 if (fresh) payload.fresh = true;
                 const result = await rpc("regenBody", payload, sessionId);
                 applyBodyResult(sessionId, result.view, tail);
-                if (result && result.view && result.view.regenerationWarning) reportError("重新生成提示", new Error(result.view.regenerationWarning));
-                if (candidates.getSnapshot() === candidate) candidates.set(null);
+                if (!result?.view?.aborted && candidates.getSnapshot() === candidate) candidates.set(null);
                 return result;
             } catch (error) {
                 reportError("正文重新生成", error);

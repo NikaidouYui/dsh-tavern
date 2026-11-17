@@ -87,11 +87,7 @@ export function createSettingsHandlers(deps) {
       return conversationBackgroundSettings.read(args?.sessionId)
     },
     async setConversationBackgroundModel(args) {
-      const result = await conversationBackgroundSettings.save(args)
-      if (args?.backgroundTasks?.plotCompass === false && deps.plotCompassService) {
-        await deps.plotCompassService.cancel({ sessionId: args?.sessionId }).catch(() => {})
-      }
-      return result
+      return conversationBackgroundSettings.save(args)
     },
     async getBackgroundModelReasoning(args) {
       return { reasoning: await readBackgroundModelReasoning(llm, args) }
@@ -110,7 +106,7 @@ export function createSettingsHandlers(deps) {
       const { readTavernSettings } = deps
 
         const settings = await readTavernSettings()
-        return { candidateDismissMode: settings.candidateDismissMode, candidateAutoGenerate: settings.candidateAutoGenerate }
+        return { candidateDismissMode: settings.candidateDismissMode, candidateAutoGenerate: settings.candidateAutoGenerate, candidateTabs: settings.candidateTabs === true }
 
     },
 
@@ -239,7 +235,7 @@ export function createSettingsHandlers(deps) {
       const patch = {
         defaultPlaySettings: {
           playerName,
-          backgroundTasks: { posture: tasks.posture !== false, plotCompass: tasks.plotCompass === true, styleReference: tasks.styleReference === true, foregroundCandidates: tasks.foregroundCandidates === true, preset: tasks.preset === true },
+          backgroundTasks: { posture: tasks.posture !== false, styleReference: tasks.styleReference === true, foregroundCandidates: tasks.foregroundCandidates === true, preset: tasks.preset === true },
           webSearchEnabled: chat.webSearchEnabled === true
         },
         defaultDisabledForegroundTools: disabledForegroundTools,

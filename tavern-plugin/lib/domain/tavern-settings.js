@@ -228,7 +228,7 @@ export function presentPromptSets(document) {
 
 export function normalizeBackgroundTasks(value) {
   const tasks = object(value)
-  return { posture: tasks.posture !== false, characterDesign: false, variables: tasks.variables !== false, ledger: false, styleReference: tasks.styleReference === true, foregroundCandidates: tasks.foregroundCandidates === true, plotCompass: tasks.plotCompass === true, preset: tasks.preset === true, worldbookScreening: false }
+  return { posture: tasks.posture !== false, characterDesign: false, variables: tasks.variables !== false, ledger: false, styleReference: tasks.styleReference === true, foregroundCandidates: tasks.foregroundCandidates === true, preset: tasks.preset === true, worldbookScreening: false }
 }
 
 
@@ -265,7 +265,7 @@ export function applyTavernSettingsPatch(current, patch) {
     if (Object.hasOwn(patch, 'webSearchEnabled') && typeof patch.webSearchEnabled !== 'boolean') throw new Error('默认开关必须为布尔值')
     if (Object.hasOwn(patch, 'playerName') && (typeof patch.playerName !== 'string' || patch.playerName.length > 80)) throw new Error('玩家称呼最多 80 字')
     if (Object.hasOwn(patch, 'statusBarPlacement') && !['body', 'sidebar'].includes(patch.statusBarPlacement)) throw new Error('状态栏位置无效')
-    for (const key of ['posture', 'styleReference', 'foregroundCandidates', 'plotCompass', 'preset']) if (Object.hasOwn(object(patch.backgroundTasks), key) && typeof patch.backgroundTasks[key] !== 'boolean') throw new Error('默认结算开关必须为布尔值')
+    for (const key of ['posture', 'styleReference', 'foregroundCandidates', 'preset']) if (Object.hasOwn(object(patch.backgroundTasks), key) && typeof patch.backgroundTasks[key] !== 'boolean') throw new Error('默认结算开关必须为布尔值')
     const current = normalizePlayDefaults(next.defaultPlaySettings)
     next.defaultPlaySettings = normalizePlayDefaults({ ...current, ...patch, backgroundTasks: { ...current.backgroundTasks, ...object(patch.backgroundTasks) } })
   }
@@ -298,8 +298,8 @@ export function applyTavernSettingsPatch(current, patch) {
     if (input.defaultPluginGameSettings !== null && (typeof input.defaultPluginGameSettings !== 'object' || Array.isArray(input.defaultPluginGameSettings))) throw new Error('默认插件本局设置无效')
     next.defaultPluginGameSettings = normalizeDefaultPluginGameSettings(input.defaultPluginGameSettings)
   }
-  // polishModel / plotCompassModel: 精修、剧情罗盘专用模型，null 时各自跟随默认配置（精修随正文，剧情罗盘随后台）。
-  for (const name of ['defaultForegroundModel', 'defaultBackgroundModel', 'defaultWorkbenchModel', 'polishModel', 'plotCompassModel']) {
+  // polishModel: 精修's own model for every game; null follows each game's story model.
+  for (const name of ['defaultForegroundModel', 'defaultBackgroundModel', 'defaultWorkbenchModel', 'polishModel']) {
     if (!Object.hasOwn(input, name)) continue
     const selection = normalizeBackgroundModel(input[name])
     if (input[name] !== null && !selection) throw new Error('默认模型配置无效')
@@ -319,6 +319,11 @@ export function applyTavernSettingsPatch(current, patch) {
   if (Object.hasOwn(input, 'candidateAutoGenerate')) {
     if (typeof input.candidateAutoGenerate !== 'boolean') throw new Error('无效的自动生成候选项设置')
     next.candidateAutoGenerate = input.candidateAutoGenerate
+  }
+  // 设置 › 高级 › 候选多角色 / 全局 Tab：默认关闭，候选项只显示精选一组。
+  if (Object.hasOwn(input, 'candidateTabs')) {
+    if (typeof input.candidateTabs !== 'boolean') throw new Error('无效的候选 Tab 设置')
+    next.candidateTabs = input.candidateTabs
   }
   if (Object.hasOwn(input, 'showPlayProcess')) {
     if (typeof input.showPlayProcess !== 'boolean') throw new Error('无效的游玩过程显示设置')
@@ -507,7 +512,6 @@ export function presentTavernSettings(document, defaults) {
     defaultForegroundModel: normalizeBackgroundModel(object(document).defaultForegroundModel),
     defaultBackgroundModel: normalizeBackgroundModel(object(document).defaultBackgroundModel),
     polishModel: normalizeBackgroundModel(object(document).polishModel),
-    plotCompassModel: normalizeBackgroundModel(object(document).plotCompassModel),
     defaultWorkbenchModel: normalizeBackgroundModel(object(document).defaultWorkbenchModel),
     contextCompaction: compactionPolicy(object(document).contextCompaction),
     showPlayProcess: object(document).showPlayProcess === true,
@@ -518,6 +522,8 @@ export function presentTavernSettings(document, defaults) {
     // existing profiles stay manual until explicitly enabled.
     
     candidateAutoGenerate: object(document).candidateAutoGenerate === true,
+    // 设置 › 高级 › 候选多角色 / 全局 Tab：默认关闭，候选卡只显示精选一组。
+    candidateTabs: object(document).candidateTabs === true,
     // 自动精修: off by default, since it reviews and rewords every reply.
     polishPrereview: object(document).polishPrereview === true,
     storyGenerationMode: ['plugin-direct', 'plugin-tool-call'].includes(document?.storyGenerationMode) ? document.storyGenerationMode : 'host',

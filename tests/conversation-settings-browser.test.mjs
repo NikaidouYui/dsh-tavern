@@ -209,4 +209,3 @@ test('本局设置功能区包含“后台任务附加预设”开关，默认�
   const lastSave = calls.filter(c => c.method === 'setConversationBackgroundConfig').at(-1)
   assert.deepEqual(lastSave.args.backgroundTasks, { preset: true })
 })
-

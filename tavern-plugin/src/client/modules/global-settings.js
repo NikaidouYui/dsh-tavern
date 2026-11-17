@@ -1,5 +1,5 @@
 // Settings owns its initial snapshot; each editor saves only its own resource.
-function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernDefaultModelSetting, TavernModelSlotGroups, TavernConversationWritingSkills, DisplayPreferencesSettings, CandidatePreferencesSettings, PromptTemplateSettingsEntry, ContextCompactionSettings, HeaderItemsSettings, TavernUserPluginsSettings, DebugSetting, SpineRuntimeEntry, ForkModManagerEntry, StageGenerationSettings, TavernSettingRow, InlineField, Switch, HelpTip, VoiceCataloguePicker, voiceKey, voiceFromKey, useReadingBinding }) {
+function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernDefaultModelSetting, TavernModelSlotGroups, TavernConversationWritingSkills, DisplayPreferencesSettings, CandidatePreferencesSettings, PromptTemplateSettingsEntry, ContextCompactionSettings, HeaderItemsSettings, TavernUserPluginsSettings, DebugSetting, SpineRuntimeEntry, ForkModManagerEntry, TavernSettingRow, InlineField, Switch, HelpTip }) {
     // explanations live in a 「?」 beside the name (ui-design R3), never as grey lines.
     const help = (label, text) => HelpTip && text ? React.createElement(HelpTip, { label: label + "说明" }, text) : null;
     function GlobalPlayDefaults({ settings }) {
@@ -21,8 +21,8 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
                     const profile = await rpc("getUserPreferenceProfile", { globalDefaults: true });
                     setData(current => ({ ...current, profile: profile.userProfile }));
                 } else setData(current => ({ ...current, ...result.settings.defaultPlaySettings }));
-                if (patch && Object.hasOwn(patch, "statusBarPlacement")) { notifySettingsChanged(); setMessage("已保存，所有对局使用此状态栏位置。"); }
-                else setMessage("已保存，新游戏继承此设置，已有游戏保持不变。");
+                if (patch && Object.hasOwn(patch, "statusBarPlacement")) notifySettingsChanged();
+                setMessage("已保存");
             } catch (err) { setMessage("保存失败：" + err.message); }
             finally { setBusy(false); }
         }
@@ -33,8 +33,8 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
             return h(TavernSettingRow, { key, title, help: text, className: "dsh-tavern-background-task" },
                 h(Switch, { label: title, disabled, checked: task ? data?.backgroundTasks[key] === true : data?.[key] === true, onChange: checked => save(task ? { backgroundTasks: { [key]: checked } } : { [key]: checked }) }));
         }
-        function menu(title, value, options, commit, text) {
-            return h(TavernSettingRow, { title, help: text },
+        function menu(title, value, options, commit) {
+            return h(TavernSettingRow, { title },
                 h(InlineField, { kind: "menu", label: title, hideLabel: true, disabled, value, options, onCommit: commit }));
         }
         const loading = !data && !message;
@@ -49,7 +49,6 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
                     value => save(null, "manageUserPreferenceProfile", { action: "default", profileId: value }))),
             h("section", { className: "dsh-local-section" }, h("h3", null, "功能"),
                 toggle("posture", "人物姿势", "总结本轮结束时人物的位置、动作和姿势。", true),
-                toggle("plotCompass", "剧情罗盘", "推演短期、中期、长期多路线剧情发展灵感，并在点亮路线后软引导正文与候选项。", true),
                 toggle("styleReference", "文风联想", "仅自由模式。前台写正文前，结合本轮场景联想一段笔调参考；与写作共享上下文，不另开后台任务。", true),
                 toggle("foregroundCandidates", "前台生成候选项", "仅自由模式。让主模型在正文结尾后直接生成本轮候选项，写完即显示，不等待后台任务。", true),
                 toggle("preset", "后台任务附加预设", "默认关闭。开启后，新游戏的全部后台 Agent 任务在生成时也会附加当前对局的三段预设提示词，不执行预设正则。", true),
@@ -58,11 +57,11 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
     }
 
     function TavernSettingsSection({ renderSlot }) {
-        const [state, setState] = React.useState({ loading: true, busy: false, defaultForegroundModel: null, defaultBackgroundModel: null, defaultWorkbenchModel: null, plotCompassModel: null, notice: "", settings: null, modelCatalog: [], modModelSlots: [], error: "" });
+        const [state, setState] = React.useState({ loading: true, busy: false, defaultForegroundModel: null, defaultBackgroundModel: null, defaultWorkbenchModel: null, notice: "", settings: null, modelCatalog: [], modModelSlots: [], error: "" });
         React.useEffect(function () {
             let active = true;
             rpc("getTavernSettings").then(function (result) {
-                if (active) setState({ loading: false, busy: false, defaultForegroundModel: result.settings?.defaultForegroundModel || null, defaultBackgroundModel: result.settings?.defaultBackgroundModel || null, defaultWorkbenchModel: result.settings?.defaultWorkbenchModel || null, plotCompassModel: result.settings?.plotCompassModel || null, notice: "", bodyGenerationProviders: result.bodyGenerationProviders || [], settings: result.settings, modModelSlots: result.modModelSlots || [], scoringCatalog: result.scoringCatalog || [], modelCatalog: Array.isArray(result.modelCatalog) ? result.modelCatalog : [], error: "" });
+                if (active) setState({ loading: false, busy: false, defaultForegroundModel: result.settings?.defaultForegroundModel || null, defaultBackgroundModel: result.settings?.defaultBackgroundModel || null, defaultWorkbenchModel: result.settings?.defaultWorkbenchModel || null, notice: "", bodyGenerationProviders: result.bodyGenerationProviders || [], settings: result.settings, modModelSlots: result.modModelSlots || [], scoringCatalog: result.scoringCatalog || [], modelCatalog: Array.isArray(result.modelCatalog) ? result.modelCatalog : [], error: "" });
             }, function (error) {
                 if (active) setState(function (current) { return Object.assign({}, current, { loading: false, busy: false, error: String(error && error.message || error) }); });
             });
@@ -70,10 +69,9 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
         }, []);
         React.useEffect(() => {
             let active=true;
-            const refresh=()=>rpc('getTavernSettings').then(result=>{if(active)setState(current=>({...current,defaultForegroundModel:result.settings?.defaultForegroundModel || null,defaultBackgroundModel:result.settings?.defaultBackgroundModel || null,defaultWorkbenchModel:result.settings?.defaultWorkbenchModel || null,plotCompassModel:result.settings?.plotCompassModel || null,modModelSlots:result.modModelSlots || [],settings:result.settings,bodyGenerationProviders:result.bodyGenerationProviders || [],modelCatalog:Array.isArray(result.modelCatalog)?result.modelCatalog:current.modelCatalog}));},error=>{if(active)setState(current=>({...current,error:String(error.message || error)}));});
+            const refresh=()=>rpc('getTavernSettings').then(result=>{if(active)setState(current=>({...current,modModelSlots:result.modModelSlots || [],settings:result.settings,bodyGenerationProviders:result.bodyGenerationProviders || []}));},error=>{if(active)setState(current=>({...current,error:String(error.message || error)}));});
             window.addEventListener('dsh-tavern-mods-changed',refresh);
-            window.addEventListener('dsh-tavern-settings-changed',refresh);
-            return ()=>{active=false;window.removeEventListener('dsh-tavern-mods-changed',refresh);window.removeEventListener('dsh-tavern-settings-changed',refresh);};
+            return ()=>{active=false;window.removeEventListener('dsh-tavern-mods-changed',refresh);};
         },[]);
         async function saveDefault(name, selection) {
             if (state.loading || state.busy) return;
@@ -110,10 +108,10 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
             h("div", { className: "dsh-tavern-gs-card" },
             React.createElement(TavernDefaultModelSetting, { label: "默认前台模型", title: "前台模型", description: "写正文、扮演角色，直接决定剧情质量", fallback: "使用 DSH 默认模型", selection: state.defaultForegroundModel, catalog: state.modelCatalog, disabled: state.loading || state.busy, onChange: selection => saveDefault("defaultForegroundModel", selection) }),
             React.createElement(TavernDefaultModelSetting, { label: "默认后台模型", title: "后台模型", description: "变量结算、世界书筛选、候选回复、手机消息等幕后任务", fallback: "跟随前台", selection: state.defaultBackgroundModel, catalog: state.modelCatalog, disabled: state.loading || state.busy, onChange: selection => saveDefault("defaultBackgroundModel", selection) }),
-            React.createElement(TavernDefaultModelSetting, { label: "剧情罗盘模型", title: "剧情罗盘模型", description: "剧情罗盘多路线推演、脑暴对话与自动节拍核对；不设时跟随后台模型", fallback: "跟随后台模型", selection: state.plotCompassModel, catalog: state.modelCatalog, disabled: state.loading || state.busy, onChange: selection => saveDefault("plotCompassModel", selection) }),
             React.createElement(TavernDefaultModelSetting, { label: "卡片工作台默认模型", title: "工作台模型", description: "卡片工作台里创建和修改人物卡", fallback: "跟随前台", selection: state.defaultWorkbenchModel, catalog: state.modelCatalog, disabled: state.loading || state.busy, onChange: selection => saveDefault("defaultWorkbenchModel", selection) }),
             null),
-                h(TavernModelSlotGroups,{slots:state.modModelSlots.filter(slot=>slot.modId !== 'dsh.stage'),values:state.settings?.modModels,catalog:state.modelCatalog,scoringCatalog:state.scoringCatalog,disabled:state.loading || state.busy,onChange:saveSlot})),
+                // the core's own slots; the stage's and its mods' (手机 · 通话模型) are on 设置 › 舞台 › 舞台模型.
+                h(TavernModelSlotGroups,{slots:state.modModelSlots.filter(slot=>slot.owner === 'core'),values:state.settings?.modModels,catalog:state.modelCatalog,scoringCatalog:state.scoringCatalog,disabled:state.loading || state.busy,onChange:saveSlot})),
             group("开局默认", "开局时继承，开局后可在本局设置中单独修改。",
                 state.settings ? h(GlobalPlayDefaults, { settings: state.settings }) : null,
                 h(TavernConversationWritingSkills, { globalDefaults: true })),
@@ -139,9 +137,10 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
                     renderSlot("settings.tavern.appearance", {}),
                     DebugSetting ? h(DebugSetting) : null,
                     h(CandidatePreferencesSettings), h(HeaderItemsSettings))),
-            group("高级", "",
-                card(sw("reasoningStreamOnly", "流式显示思维链", "思考内容在生成过程中自动铺开，本次思考写完立即收起；不改变宿主「工作步骤展示」的档位。关闭后宿主怎么显示就怎么显示。", true),
-                    sw("retryOnFailure", "请求失败自动重试", "模型请求因网络中断、服务端错误或限流失败时，自动再发一次（一轮最多两次请求）。关闭后失败即停在这一步，等你手动重发；DSH 自身的重试也不会介入。下一轮生效。", true),
+            // the anti-truncation block: the tool-call plumbing that keeps long outputs from being
+            // cut mid-body on channels that support tool calls (Gemini especially), grouped out of 高级.
+            group("防截断", "本区域可以帮助支持工具调用的渠道改善 Gemini 模型输出截断问题。",
+                card(sw("retryOnFailure", "请求失败自动重试", "模型请求因网络中断、服务端错误或限流失败时，自动再发一次（一轮最多两次请求）。关闭后失败即停在这一步，等你手动重发；DSH 自身的重试也不会介入。下一轮生效。", true),
                     sw("storyInputToolCall", "输入走工具调用", "把发给模型的历史以工具记录形式回放，而不是普通对话文字；可降低续写被退回概率。只影响请求，存档和界面保持不变。需要模型支持工具调用。", false),
                     sw("storyOutputToolCall", "输出走工具调用", "仅用于宿主生成方式。通过协议级 tool_choice 强制模型调用 submit_story 提交本轮正文，并在 Gemini 渠道自动维护 thoughtSignature 签名链。需要模型支持工具调用。", false),
                     sw("storyToolThinking", "工具内思考槽", "开启「输出走工具调用」时，在 submit_story 参数首位增加必填 think 思考字段并锁定生成顺序（先构思再写正文），结算后自动归入思维链折叠行。遇到强制工具与原生思考互斥的渠道时也会自动启用。", false),
@@ -153,9 +152,12 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
                                 { value: "bodies", label: "仅历史正文转调用" },
                                 { value: "envelope", label: "全信封模式（设定+输入全入工具）" }
                             ],
-                            onCommit: value => saveDefault("storyToolHistoryMode", value) })),
+                            onCommit: value => saveDefault("storyToolHistoryMode", value) })))),
+            group("高级", "",
+                card(sw("reasoningStreamOnly", "流式显示思维链", "思考内容在生成过程中自动铺开，本次思考写完立即收起；不改变宿主「工作步骤展示」的档位。关闭后宿主怎么显示就怎么显示。", true),
                     sw("longPressSendRegenerate", "长按 1 秒发送键重新生成", "按住输入框右侧的发送键 1 秒，直接重新生成本轮正文，不打开「重新生成正文」的意见面板；触发前松开或移开即取消。默认关闭。", false),
                     sw("recentReplyFirst", "对话按最新回复排序", "关闭时左侧对话按创建时间固定排列（默认），打开或继续一个对话都不改变它的位置。打开后改成最近回复优先：只有生成出新回复的对话才会排到最前，单纯切换/打开对话不会把它顶上去，一行右侧的时间也换成最近回复时间。只改变列表顺序，不改动存档。", false),
+                    sw("candidateTabs", "候选多角色 / 全局 Tab", "候选项按在场角色和全局事件分成「精选 / 角色 / 全局」几组 Tab 切换，默认停在精选。关闭后候选卡只显示精选一组，不再出现 Tab 条。改动立即生效。", false),
                     h(PromptTemplateSettingsEntry),
                     h(ContextCompactionSettings)))
         );
@@ -167,29 +169,6 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
             h("header", {className:"dsh-tavern-gs-head"}, h("h2", null, title)),
             h("div", {className:"dsh-tavern-gs-card"}, children));
     }
-    function ReadAloudSettings() {
-        const h = React.createElement, binding = useReadingBinding();
-        const [reading, setReading] = React.useState(null), [notice, setNotice] = React.useState(''), [busy, setBusy] = React.useState(false);
-        React.useEffect(() => {
-            let active = true;
-            const refresh = () => binding.tts.call('reading').then(value => { if (active) setReading(value.readAloud); }, () => { if (active) setNotice('无法读取朗读设置'); });
-            if (!binding.tts?.available()) { setReading(null); return; }
-            void refresh();
-            const off = binding.tts.subscribe(event => { if (event.type === 'readingChanged') void refresh(); });
-            return () => { active = false; off(); };
-        }, [binding]);
-        async function save(patch) {
-            setBusy(true); setNotice('');
-            try { const value = await binding.tts.call('setReading', {readAloud:patch}); setReading(value.readAloud); }
-            catch (_) { setNotice('保存失败，请重试'); }
-            finally { setBusy(false); }
-        }
-        return h(SettingsGroup, {title:'朗读'},
-            !binding.tts?.available() ? h('p', {role:'status'}, '配音服务未启用') : reading ? h(React.Fragment, null,
-                h(TavernSettingRow, {title:'朗读声音'}, h(VoiceCataloguePicker, {binding, value:voiceKey(reading.voice), label:'朗读声音', leading:[{value:'',label:'浏览器 · 系统默认'}], onPick:key => save({voice:voiceFromKey(key)})})),
-                h(TavernSettingRow, {title:'自动朗读',help:'每条新回复用朗读声音读一次；本卡舞台配音开启时让位于角色配音。'}, h(Switch, {label:'自动朗读',checked:reading.auto,disabled:busy,onChange:auto => save({auto})}))) : h('p', {role:'status'}, '正在读取…'),
-            notice ? h('p', {role:'status'}, notice) : null);
-    }
     function TavernPluginsSettingsSection() {
         const h = React.createElement;
         return h("div", {className:"dsh-tavern-settings-section dsh-tavern-global-settings"},
@@ -198,13 +177,12 @@ function createGlobalSettingsModule({ React, rpc, notifySettingsChanged, TavernD
                     h("a", { href: "https://discord.gg/hYAEjKnpra", target: "_blank", rel: "noopener noreferrer" }, "Discord 交流群"),
                     "的插件分享，查找社区作者发布的插件及使用说明。"),
                 h("p", null, "给酒馆加功能：粘贴插件作者的 GitHub 地址，或上传 ZIP 安装包。不支持 SillyTavern 插件。"),
-                h(TavernUserPluginsSettings)), h(ReadAloudSettings));
+                h(TavernUserPluginsSettings)));
     }
     // 设置 › 舞台 is the stage package's page (global-settings.js in dsh-tavern-stage, stageViews.GlobalSettings): opening it holds the
     // stage client (stage-client-loader.cjs hold) so the page loads for any card; the core only draws the wait. The names the
     // page needs from the core travel as the stage view options (gal-stage.js bindStageViews, globalSettings);
-    // TavernSettingRow and Switch draw the four-state 基础设置 switches.
-    const stageGlobalSettingsOptions = {rpc, notifySettingsChanged, TavernModelSlotGroups, SettingsGroup, StageGenerationSettings, SpineRuntimeEntry, ForkModManagerEntry, TavernSettingRow, Switch};
+    const stageGlobalSettingsOptions = {rpc, notifySettingsChanged, TavernModelSlotGroups, SettingsGroup, SpineRuntimeEntry, ForkModManagerEntry};
     function TavernStageSettingsSection() {
         const h = React.createElement;
         React.useEffect(() => galStageHold(), []);

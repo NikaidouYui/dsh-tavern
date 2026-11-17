@@ -151,9 +151,10 @@ test('运行时内存补丁仅放宽旧默认 300000ms，保留显式配置并�
   assert.equal(piAi.profileOf(snapshot, 'defaulted').streamIdleTimeoutMs, 300_000)
 })
 
-test('后台模型进度默认空闲超时为 10 分钟', () => {
+test('后台模型进度保持上游 90 秒空闲上限，避免阻塞下一回合', () => {
+  assert.equal(RELAXED_STREAM_IDLE_TIMEOUT_MS, 600_000)
   const progress = createBackgroundProgress()
-  assert.equal(progress.snapshot().idleTimeoutMs, RELAXED_STREAM_IDLE_TIMEOUT_MS)
+  assert.equal(progress.snapshot().idleTimeoutMs, 90_000)
   progress.dispose()
 })
 

@@ -88,8 +88,10 @@ export function createNativeConversationStorage({dataRoot,onIO}){
    }
    onIO?.({kind:'phase',name:'chat.native.summary-scan',chatId:id,durationMs:performance.now()-started})
    const value={messages,pending,bytes}
+   // 手机在 12 个会话之间来回切：只留 4 份时刚切一圈就全部落空，每次都要重扫全历史
+   // page。上限提到 12 份（与视图/故事窗口缓存同档），字节上限相应放宽。
    if(bytes<=8*1024*1024){
-    while(summaryCache.size && (summaryCache.size>=4 || summaryBytes+bytes>16*1024*1024)){
+    while(summaryCache.size && (summaryCache.size>=12 || summaryBytes+bytes>24*1024*1024)){
      const oldest=summaryCache.keys().next().value;summaryBytes-=summaryCache.get(oldest).bytes;summaryCache.delete(oldest)
     }
     summaryCache.set(key,value);summaryBytes+=bytes
@@ -530,7 +532,7 @@ export function createNativeConversationStorage({dataRoot,onIO}){
   if(!view)return null
   const chat=await selectedHeader(id,view,['id','sessionId','_storageRevision','mode','cardPath','cardContextRevision',
    'backgroundConfigVersion','conversationFeaturesVersion','backgroundTasks','disabledWritingSkills','contextCompaction','updatedAt','timeline','candidateAgent',
-   'cardName','requestMode','statusBarPlacement','statusSections','webSearchEnabled','candidates','plotCompass','plotCompassTask','taskMailbox','regenInProgress','settleError','scriptState',
+   'cardName','requestMode','statusBarPlacement','statusSections','webSearchEnabled','candidates','taskMailbox','regenInProgress','settleError','scriptState',
    'hiddenDshErrorTurns','suppressedDshTurns','replacingDshTurns','failedRegenerationTarget','regeneratedDshTurns','tavernHelperLifecycleRevision','importHistory','rollbackUndo','pendingMvuSettlement'])
   if(Object.values(chat.timeline?.operations??{}).some(op=>op?.kind==='body'&&op.status==='foreground-completed'))return projectChatSessionState((await read(id)).chat,{detach:false})
   // Cached rows never leave this module: full projections detach them below,
@@ -601,7 +603,7 @@ export function createNativeConversationStorage({dataRoot,onIO}){
   // Task metadata changes do not touch story rows, world state or indexes.
   // Apply them directly to the header tree instead of materializing the card.
   if (Array.isArray(returnProjection) && changes.length && changes.every(change =>
-    ['set','delete'].includes(change.op) && change.path?.length >= 1 && ['taskMailbox','timeline','candidateAgent','candidates','plotCompass','plotCompassTask','scriptState','_storageRevision','updatedAt'].includes(change.path[0]))) {
+    ['set','delete'].includes(change.op) && change.path?.length >= 1 && ['taskMailbox','timeline','candidateAgent','candidates','scriptState','_storageRevision','updatedAt'].includes(change.path[0]))) {
    const nextRevision=changes.find(change=>change.path[0]==='_storageRevision')?.value
    if(nextRevision!==revision+1)throw Error('Invalid journal patch revision')
    const batch=createBufferedJsonRecords({read:ref=>pages.readRecord(id,ref),writeMany:(values,refs)=>pages.writeRecords(id,values,refs)})

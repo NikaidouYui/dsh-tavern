@@ -142,8 +142,6 @@ test('楼层操作用故事正文和稳定轮次，回退提交确认过的消�
 	) + '\nTavernRollbackToTurnButton', page.context)
 	const feature = page.context.createTavernStoryTranscriptFeature({
 		replyActions: {
-			useReadAloudState: () => ({ auto: false }),
-			ReadAloud: props => button('朗读', props.source),
 			Illustrate: props => button('配图', props.turn),
 			Receipt: props => button('变量结算', props.storyTurn),
 			Latest: () => button('更多'),
@@ -155,7 +153,8 @@ test('楼层操作用故事正文和稳定轮次，回退提交确认过的消�
 	const document = page.dom.window.document
 	const [duplicate, , historical, latest, user] = document.querySelectorAll('[data-story-row]')
 	const action = (row, label) => row.querySelector('button[aria-label="' + label + '"]')
-	assert.equal(action(duplicate, '朗读').textContent, '重号正文甲')
+	// 有声书 (the 顶栏 speaker) reads the story; a reply has no 🔊 of its own (owner 11-18)
+	assert.equal(duplicate.querySelector('[data-fork-turn="speech"]'), null)
 	assert.equal(action(duplicate, '配图'), null)
 	assert.equal(action(duplicate, '回退到这一轮'), null)
 	assert.equal(action(historical, '配图').textContent, '12')
@@ -163,7 +162,6 @@ test('楼层操作用故事正文和稳定轮次，回退提交确认过的消�
 	assert.equal(action(historical, '更多'), null)
 	assert.ok(action(latest, '更多'))
 	assert.equal(action(latest, '回退到这一轮'), null)
-	assert.equal(action(user, '朗读'), null)
 	await act(async () => action(historical, '回退到这一轮').click())
 	assert.match(calls[0], /回退到第 3 楼/)
 	assert.deepEqual(calls[1], { method: 'rollbackToTurn', turn: 12, messageUid: 'story-12', sessionId: 'game' })
@@ -506,4 +504,113 @@ test('流式思考超过折叠框高度时自动滚到底部，上翻阅读时�
 	scrollHeight = 960
 	await act(async () => root.render(element({ turn: 1, step: 1, blocks: [{ kind: 'reasoning', text: '第二步继续思考' }] })))
 	assert.equal(scrollTop, 760, '新一步思考重新展开时应自动滚到最新位置')
+})
+
+test('长故事只挂读者附近的楼层，其余楼层留同样标记的空楼层，舞台盖住时全部收起', async t => {
+	const observed = new Map()
+	class FakeIntersectionObserver {
+		constructor(callback) { this.callback = callback; this.targets = new Set() }
+		observe(target) { this.targets.add(target); observed.set(target.getAttribute('data-row-key'), this) }
+		unobserve(target) { this.targets.delete(target) }
+		disconnect() { this.targets.clear() }
+	}
+	class FakeResizeObserver { observe() {} unobserve() {} disconnect() {} }
+	let active = ''
+	const listeners = new Set()
+	const galActive = { get: () => active, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn) } }
+	const page = createPage(t, { IntersectionObserver: FakeIntersectionObserver, ResizeObserver: FakeResizeObserver, CSS: { escape: value => value }, galActive })
+	const messages = []
+	for (let turn = 1; turn <= 8; turn++) messages.push({ role: 'user', text: '行动' + turn }, { role: 'assistant', turn, text: '第 ' + turn + ' 轮正文' })
+	const feature = page.context.createTavernStoryTranscriptFeature()
+	await mount(page, React.createElement('div', { 'data-conversation-scroll': '' },
+		React.createElement(feature.StoryTranscriptList, { transcript: story(messages), sessionId: 'game' })))
+	const doc = page.dom.window.document
+	const held = () => [...doc.querySelectorAll('[data-story-held]')].map(row => row.getAttribute('data-floor'))
+	const floor = n => doc.querySelector('[data-story-row][data-floor="' + n + '"]')
+	// 最新两层挂着，更早的楼层收起，但仍是带楼层号和锚点的故事行（楼层跳转与宿主滚动锚点照旧认得）。
+	assert.deepEqual(held(), ['1', '2', '3', '4', '5', '6'])
+	assert.equal(floor(3).getAttribute('data-chat-anchor-key'), floor(3).getAttribute('data-row-key'))
+	assert.match(floor(3).style.height, /px$/)
+	assert.match(floor(8).textContent, /第 8 轮正文/)
+	// 滚到第 3 层附近才挂回正文。
+	const target = floor(3)
+	await act(async () => { observed.get(target.getAttribute('data-row-key')).callback([{ target, isIntersecting: true }]); await Promise.resolve() })
+	assert.deepEqual(held(), ['1', '2', '4', '5', '6'])
+	assert.match(floor(3).textContent, /第 3 轮正文/)
+	// 舞台盖住这一局：读者附近的楼层也收起；离开舞台后挂回。
+	await act(async () => { active = 'game'; for (const fn of listeners) fn() })
+	assert.deepEqual(held(), ['1', '2', '3', '4', '5', '6'])
+	await act(async () => { active = ''; for (const fn of listeners) fn() })
+	assert.deepEqual(held(), ['1', '2', '4', '5', '6'])
+
+	// 楼层跳转期间若跳转前已有挂起的旧锚点（jumpToken 已推进），restore() 不得把 scrollTop 拉回旧楼层。
+	const scroller = doc.querySelector('[data-conversation-scroll]')
+	scroller.scrollTop = 2400
+	scroller.getBoundingClientRect = () => ({ top: 40, bottom: 640, left: 0, right: 390, width: 390, height: 600 })
+	floor(7).getBoundingClientRect = () => ({ top: 50, bottom: 350, left: 0, right: 390, width: 390, height: 300 })
+	const floor2 = floor(2)
+	await act(async () => {
+		const io = observed.get(floor2.getAttribute('data-row-key'))
+		// 先在 jumpToken 变化前触发一次收起/挂回捕获旧锚点（第 7 层），紧接着发生楼层跳转改写 data-story-jump-token。
+		io.callback([{ target: floor2, isIntersecting: true }])
+		scroller.setAttribute('data-story-jump-token', '1')
+		scroller.scrollTop = 180
+		await Promise.resolve()
+	})
+	assert.equal(scroller.scrollTop, 180, '跨楼层跳转推进 jumpToken 后，旧视口锚点不得把滚动条拉回底部')
+})
+
+test('切回后台生成新楼层的会话时，旧 liveTavernView 快照不得覆盖新楼层的 Helper 上下文', async t => {
+	const staleHelper = { stateRevision: 1, messages: [{ message_id: 0, role: 'assistant', message: '旧楼层' }] }
+	const freshHelper = {
+		stateRevision: 3,
+		messages: [
+			{ message_id: 0, role: 'assistant', message: '旧楼层' },
+			{ message_id: 1, role: 'user', message: '行动' },
+			{ message_id: 2, role: 'assistant', message: '后台新楼层 HTML' }
+		],
+		turnMessageIds: { '1': 0, '2': 2 }
+	}
+	const staleLiveView = {
+		mode: 'story',
+		storageRevision: 1,
+		tavernRuntimePolicy: { trustedCardMode: true },
+		tavernHelper: staleHelper
+	}
+	let capturedHelper = null
+	let capturedReaderHelper = null
+	const page = createPage(t, {
+		isPlayMode: mode => mode === 'story',
+		useLiveTavernView: () => ({ view: staleLiveView }),
+		liveTavernView: { getSnapshot: () => ({ view: staleLiveView }) }
+	})
+	const saved = story([
+		{ role: 'assistant', greeting: true, turn: 1, text: '旧楼层' },
+		{ role: 'user', text: '行动' },
+		{ role: 'assistant', turn: 2, text: '<div>后台新楼层 HTML</div>', displayMode: 'html', displayParts: [{ kind: 'html', content: '<div>后台新楼层 HTML</div>' }] }
+	], 3)
+	const freshStoryView = {
+		mode: 'story',
+		storageRevision: 3,
+		tavernRuntimePolicy: { trustedCardMode: true },
+		tavernHelper: freshHelper,
+		replyProjections: [
+			{ version: 2, turn: 1, mode: 'markdown', text: '旧楼层' },
+			{ version: 2, turn: 2, mode: 'html', parts: [{ kind: 'html', content: '<div>后台新楼层 HTML</div>' }] }
+		]
+	}
+	const feature = page.context.createTavernStoryTranscriptFeature({
+		renderProjection: (projection, options) => {
+			if (options.turn === 2) {
+				capturedHelper = options.helperContext
+				capturedReaderHelper = options.helperContextReader()
+			}
+			return React.createElement('div', { 'data-turn': String(options.turn) }, 'card-frame')
+		}
+	})
+	await mount(page, React.createElement(feature.StoryTranscriptList, {
+		transcript: saved, view: freshStoryView, sessionId: 's-bg-card'
+	}))
+	assert.equal(capturedHelper, freshHelper, '新楼层首次渲染必须直接拿到包含最新楼层的 storyView.tavernHelper')
+	assert.equal(capturedReaderHelper, freshHelper, '卡片挂载读取器不得回退到滞后的 liveTavernView 快照')
 })

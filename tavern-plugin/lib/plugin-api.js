@@ -1,7 +1,7 @@
 import { createHostBehaviorPolicies } from './domain/plugin-host-behavior.js'
 import { MAX_PLUGIN_DATA } from './domain/plugin-data-store.js'
-import { isMvuUpdateEntry } from './domain/worldbook-recall.js'
 import { createHash } from 'node:crypto'
+import { isMvuUpdateEntry } from './domain/worldbook-mvu-entry.js'
 import { createPluginGameModes } from './domain/plugin-game-mode.js'
 import { createGameModeAgents } from './domain/game-mode-agents.js'
 import { createPluginTaskExecution } from './domain/plugin-task-execution.js'
@@ -37,6 +37,10 @@ const POOL_ENTRY_ID = /^[A-Za-z0-9._-]{1,64}$/
 const PLUGIN_TIMEOUT_MS = 30000
 const REPLACEMENT_TIMEOUT_MS = 120000
 const MAX_MEMBER_SYSTEM = 20000
+// 叙事阻尼器附加题：插件在宿主裁定前补问的题目，随阻尼器同一趟请求送出
+const DAMPER_QUESTION_TIMEOUT_MS = 1500
+const MAX_DAMPER_QUESTIONS_PER_PLUGIN = 6
+const MAX_DAMPER_QUESTIONS_TOTAL = 10
 const MAX_VARIABLES = 1024 * 1024
 const MAX_EDIT_TEXT = 200000
 const MAX_HISTORY_TURNS = 50
@@ -181,6 +185,8 @@ export function createTavernPluginApi(deps) {
   const pricingProviders = new Map()
   const galleryProviders = new Map()
   const mvuSettlementProviders = new Map()
+  // 插件注册的阻尼器附加题：{ owner, name, questions }
+  const damperQuestionProviders = new Map()
   // Host-only: whoever prepares what a picture needs (the stage's 自动素材), behind tavern.beforeImagePlan /
   // beforeImageGenerate (null: nothing to wait for).
   let imageGateProvider = null
@@ -197,7 +203,9 @@ export function createTavernPluginApi(deps) {
     return name
   }
   const capabilities = Object.freeze({ gameMode: 1, hostBehavior: 1, controlInput: 1, mvuSettlementProvider: 1, worldbookStrategy: 1, galleryProvider: 1, pricingProvider: 1, imageModels: 1, imageLibrary: 1, bodyGeneration: 1, bodyProjection: 1, stContractService: 1,
-    ...(deps.generationPresets ? { generationPresets: 1 } : {}) })
+    ...(deps.generationPresets ? { generationPresets: 1 } : {}),
+    ...(deps.decisionJudge ? { decisionJudge: 1 } : {}),
+    ...(deps.narrativeDamper ? { narrativeDamper: 1 } : {}) })
   // Allocated only when a plugin declares a read capability.
   let readDeclarations
   let readEpoch = 0
@@ -253,6 +261,7 @@ export function createTavernPluginApi(deps) {
   const settlementTools = new Map()
   const worldbookSources = new Map()
   const worldbookPools = new Map()
+  const worldbookScanSections = new Map()
   const castSources = new Map()
   const handlers = new Map()
   const candidateSections = new Map()
@@ -468,6 +477,50 @@ export function createTavernPluginApi(deps) {
       result.push({ name: 'tavern-plugin:' + entry.owner + ':' + entry.name, owner: entry.owner, ...(entry.position === 'before' ? { position: 'before' } : {}), text: entry.unbounded ? text.trim() : text.trim().slice(0, MAX_SECTION_TEXT) })
     }
     return result
+  }
+
+  // 宿主在阻尼器裁定前收集插件附加题：本局已关闭的插件与越权卡内插件都不参与
+  async function collectDamperQuestions(input = {}) {
+    const gameId = input.gameId === undefined || input.gameId === null ? '' : String(input.gameId)
+    const { disabled, elsewhere } = gameId
+      ? await choicesFor(gameId).catch(() => ({ disabled: new Set(), elsewhere: new Set() }))
+      : { disabled: new Set(), elsewhere: new Set() }
+    const context = {
+      gameId: gameId || null,
+      turn: Number(input.turn) || 0,
+      input: String(input.input ?? '').slice(0, 4000),
+      protocol: String(input.protocol || ''),
+      capabilities: {
+        noul: Boolean(input.capabilities?.noul),
+        choice: Boolean(input.capabilities?.choice),
+        score: Boolean(input.capabilities?.score)
+      },
+      stateSnapshot: input.stateSnapshot === undefined ? null : structuredClone(input.stateSnapshot),
+      posture: String(input.posture ?? '').slice(0, 400)
+    }
+    const entries = Array.from(damperQuestionProviders.values())
+      .filter(entry => !disabled.has(entry.owner) && !elsewhere.has(entry.owner))
+      .sort((a, b) => a.owner.localeCompare(b.owner) || a.name.localeCompare(b.name))
+    const collected = []
+    let total = 0
+    for (const entry of entries) {
+      if (total >= MAX_DAMPER_QUESTIONS_TOTAL) break
+      let questions
+      try {
+        questions = await bounded(Promise.resolve().then(() => entry.questions(structuredClone(context))),
+          '阻尼器附加题 ' + entry.name, DAMPER_QUESTION_TIMEOUT_MS)
+      } catch (error) {
+        recordError(gameId || null, entry.owner, '阻尼器附加题', error)
+        continue
+      }
+      if (!Array.isArray(questions) || !questions.length) continue
+      const room = Math.min(MAX_DAMPER_QUESTIONS_PER_PLUGIN, MAX_DAMPER_QUESTIONS_TOTAL - total)
+      const picked = questions.filter(question => question !== null && typeof question === 'object').slice(0, room)
+      if (!picked.length) continue
+      total += picked.length
+      collected.push({ owner: entry.owner, questions: picked.map(question => structuredClone(question)) })
+    }
+    return collected
   }
 
   const hostBehavior = createHostBehaviorPolicies({ allowed: async (owner, gameId) => {
@@ -786,7 +839,8 @@ export function createTavernPluginApi(deps) {
 
     // Draw one picture on the channel the image plugin offers (tavern.imageProvider), the one Tavern's asset pictures use:
     // { prompt, width, height, background?, quality?, references?: [{ data, mediaType }] (PNG/JPEG/WebP, ≤ 8 MiB each),
-    // signal? } → { data, mediaType }. Shares their limit of four in flight. Errors carry code NOT_CONFIGURED /
+    // signal? } → { data, mediaType, provider?, model?, cost: { usd, estimated, model, usage } } (cost from the usage the
+    // channel returned, else estimated from the request; usd is null for a model without a listed price). Shares their limit of four in flight. Errors carry code NOT_CONFIGURED /
     // UNSUPPORTED_CHANNEL / INVALID_ARGUMENT / BUSY / GENERATION_FAILED; mayHaveCharged === true when a request went out.
     async generateImage(input = {}) {
       if (!deps.generateImage) throw Object.assign(new Error('当前版本不支持生图'), { code: 'TAVERN_PLUGIN_NOT_FOUND' })
@@ -1352,6 +1406,144 @@ export function createTavernPluginApi(deps) {
       }
     },
 
+    // 当前对局正在使用的前台对话模型（供插件遵循「跟随前台」选项）。
+    async foregroundModel({ gameId } = {}) {
+      const game = await requireGame(gameId)
+      const selection = await deps.foregroundModel?.(game.sessionId)
+      if (!selection || !selection.provider || !selection.model) return null
+      return {
+        provider: String(selection.provider),
+        model: String(selection.model),
+        ...(selection.reasoningEffort ? { reasoningEffort: String(selection.reasoningEffort) } : {})
+      }
+    },
+
+    // 读取当前对局的现场态势、指南、台账、世界书常量/全量条目及剧本窗口快照（只读）。
+    async getPlayMaterial({ gameId } = {}) {
+      const game = await requireGame(gameId)
+      return structuredClone((await deps.readPlayMaterial?.(game.sessionId)) ?? null)
+    },
+
+    // 查询决策判定模型的当前可用性与支持的题型，不暴露密钥、键名或地址
+    async decisionJudgeStatus() {
+      ownerOf(this)
+      if (!deps.decisionJudge?.status) {
+        return {
+          available: false,
+          provider: '',
+          model: '',
+          capabilities: { noul: false, choice: false, score: false },
+          reason: 'UNAVAILABLE'
+        }
+      }
+      const status = await deps.decisionJudge.status()
+      return {
+        available: Boolean(status?.available),
+        provider: String(status?.provider || ''),
+        model: String(status?.model || ''),
+        capabilities: {
+          noul: Boolean(status?.capabilities?.noul),
+          choice: Boolean(status?.capabilities?.choice),
+          score: Boolean(status?.capabilities?.score)
+        },
+        ...(status?.reason ? { reason: String(status.reason) } : {})
+      }
+    },
+
+    // 复用宿主决策判定模型对输入文本执行结构化概率/分值/档位判定
+    async judgeDecision({ gameId, input, questions, desensitize, signal, timeoutMs } = {}) {
+      const owner = ownerOf(this)
+      if (!deps.decisionJudge?.judge) {
+        throw Object.assign(new Error('当前版本不支持决策判定能力'), { code: 'TAVERN_PLUGIN_NOT_FOUND' })
+      }
+      if (gameId !== undefined) {
+        const game = await requireGame(gameId)
+        await guardScope(owner, { gameId: game.sessionId })
+        if ((await choicesFor(game.sessionId)).disabled.has(owner)) {
+          throw new Error('玩家在本局关闭了插件 ' + owner)
+        }
+      } else {
+        // 卡内插件必须指定所属人物卡的 gameId，全局与宿主插件可省略
+        await guardScope(owner, { gameId: '' })
+      }
+      if (typeof input !== 'string' || !input.trim() || input.trim().length > 24000) {
+        throw Object.assign(new Error('input 必须为 1 至 24000 字符的非空字符串'), { code: 'TAVERN_PLUGIN_DECISION_INVALID_INPUT' })
+      }
+      if (!Array.isArray(questions) || !questions.length || questions.length > 16) {
+        throw Object.assign(new Error('questions 必须为 1 至 16 条题目组成的数组'), { code: 'TAVERN_PLUGIN_DECISION_INVALID_INPUT' })
+      }
+      if (signal !== undefined && (!signal || typeof signal.aborted !== 'boolean')) {
+        throw Object.assign(new Error('signal 必须是 AbortSignal 对象'), { code: 'TAVERN_PLUGIN_DECISION_INVALID_INPUT' })
+      }
+      let boundedTimeoutMs
+      if (timeoutMs !== undefined) {
+        const num = Number(timeoutMs)
+        if (!Number.isFinite(num) || num <= 0) {
+          throw Object.assign(new Error('timeoutMs 必须为正数'), { code: 'TAVERN_PLUGIN_DECISION_INVALID_INPUT' })
+        }
+        boundedTimeoutMs = Math.max(500, Math.min(PLUGIN_TIMEOUT_MS, Math.round(num)))
+      }
+      try {
+        return await deps.decisionJudge.judge({
+          input,
+          questions,
+          ...(desensitize !== undefined ? { desensitize: Boolean(desensitize) } : {}),
+          ...(signal ? { signal } : {}),
+          ...(boundedTimeoutMs !== undefined ? { timeoutMs: boundedTimeoutMs } : {})
+        })
+      } catch (cause) {
+        const codeMap = {
+          DAMPER_NO_KEY: 'TAVERN_PLUGIN_DECISION_NOT_CONFIGURED',
+          DAMPER_INVALID_CONFIG: 'TAVERN_PLUGIN_DECISION_INVALID_CONFIG',
+          DAMPER_UNSUPPORTED_QUESTION_TYPE: 'TAVERN_PLUGIN_DECISION_UNSUPPORTED_QUESTION_TYPE',
+          DAMPER_SAFETY_BLOCKED: 'TAVERN_PLUGIN_DECISION_SAFETY_BLOCKED',
+          DAMPER_AUTH_ERROR: 'TAVERN_PLUGIN_DECISION_AUTH_ERROR',
+          DAMPER_RATE_LIMIT: 'TAVERN_PLUGIN_DECISION_RATE_LIMIT',
+          DAMPER_TIMEOUT: 'TAVERN_PLUGIN_DECISION_TIMEOUT',
+          DAMPER_ABORTED: 'TAVERN_PLUGIN_DECISION_ABORTED',
+          DAMPER_INVALID_RESPONSE: 'TAVERN_PLUGIN_DECISION_INVALID_RESPONSE',
+          DAMPER_INVALID_INPUT: 'TAVERN_PLUGIN_DECISION_INVALID_INPUT'
+        }
+        const mapped = codeMap[cause?.code] || 'TAVERN_PLUGIN_DECISION_FAILED'
+        const message = String(cause?.message || '决策判定请求失败')
+        throw Object.assign(new Error(message), { code: mapped })
+      }
+    },
+
+    // 注册阻尼器附加题：宿主在裁定前调用，题目随阻尼器同一趟请求送出
+    damperTurnQuestions({ name, questions } = {}) {
+      const owner = ownerOf(this)
+      sectionName(name)
+      if (typeof questions !== 'function') throw new TypeError('questions 必须是函数')
+      const entry = { owner, name, questions }
+      return register.call(this, damperQuestionProviders, owner + '\u0000' + name, entry,
+        'tavern.damperTurnQuestions()', '阻尼器附加题 ' + name + ' 已注册')
+    },
+
+    // 读取本轮阻尼状态与合并后的附加题答案（只读克隆）
+    async getDamperTurnContext({ gameId, turn } = {}) {
+      const owner = ownerOf(this)
+      if (!deps.narrativeDamper?.turnContextForPlugin) {
+        throw Object.assign(new Error('当前版本不支持叙事阻尼器上下文'), { code: 'TAVERN_PLUGIN_NOT_FOUND' })
+      }
+      const game = await requireGame(gameId)
+      await guardScope(owner, { gameId: game.sessionId })
+      if ((await choicesFor(game.sessionId)).disabled.has(owner)) throw new Error('玩家在本局关闭了插件 ' + owner)
+      return deps.narrativeDamper.turnContextForPlugin(game.chatId, turn, owner)
+    },
+
+    // 把真骰结果回传给阻尼器，同步本轮推进尺度与结算配额
+    async applyDamperDiceShift({ gameId, turn, tier, check, summary } = {}) {
+      const owner = ownerOf(this)
+      if (!deps.narrativeDamper?.applyDiceOutcomeShift) {
+        throw Object.assign(new Error('当前版本不支持叙事阻尼器联动'), { code: 'TAVERN_PLUGIN_NOT_FOUND' })
+      }
+      const game = await requireGame(gameId)
+      await guardScope(owner, { gameId: game.sessionId })
+      if ((await choicesFor(game.sessionId)).disabled.has(owner)) throw new Error('玩家在本局关闭了插件 ' + owner)
+      return deps.narrativeDamper.applyDiceOutcomeShift({ chatId: game.chatId, turn, owner, tier, check, summary })
+    },
+
     async attach({ gameId, turn, textVersion, item } = {}) {
       const owner = ownerOf(this)
       const material = await requireTurn(gameId, turn)
@@ -1514,6 +1706,13 @@ export function createTavernPluginApi(deps) {
       sectionName(name)
       if (typeof entries !== 'function') throw new TypeError('entries 必须是函数')
       return register.call(this, worldbookPools, owner + '\u0000' + name, { owner, name, entries }, 'tavern.worldbookEntries()', '世界书条目来源 ' + name + ' 已注册')
+    },
+
+    // 插件可提供追加到前台世界书关键词召回扫描串的补充文本。
+    worldbookScanText({ name, text } = {}) {
+      const owner = ownerOf(this)
+      sectionName(name); textOrFunction(text)
+      return register.call(this, worldbookScanSections, owner + '\u0000' + name, { owner, name, text }, 'tavern.worldbookScanText()', '世界书扫描文本 ' + name + ' 已注册')
     }
   }
   // Every call naming a game or a card passes the card-plugin scope check first.
@@ -1924,6 +2123,13 @@ export function createTavernPluginApi(deps) {
     return collectSections(compactionSections, { gameId }, '压缩说明段落', (await choicesFor(gameId)).disabled)
   }
 
+  /** Seam: extra scan text strings plugins contribute to foreground worldbook recall. */
+  async function worldbookScanTexts({ gameId }) {
+    const { disabled } = await choicesFor(gameId).catch(() => ({ disabled: new Set() }))
+    const items = await collectSections(worldbookScanSections, { gameId }, '世界书扫描文本', disabled)
+    return items.map(item => item.text).filter(Boolean)
+  }
+
   /** Seam: the characters plugins offer to a game's cast, checked; a failing source is skipped. */
   async function castAssetSources({ gameId }) {
     const { disabled } = await choicesFor(gameId).catch(() => ({ disabled: new Set() }))
@@ -2154,7 +2360,7 @@ export function createTavernPluginApi(deps) {
     return results.sort((a, b) => (order.get(a.versionId) ?? 0) - (order.get(b.versionId) ?? 0))
   }
 
-  return Object.freeze({ resolveReadCapability, hostBehavior, gameModes, bodyGenerators, taskCatalog, service, mvuProvider, mvuProviderActive, mvuProviderRegistered, capabilities, toolModesFor, toolSkillsFor, toolNetworkFor: name => toolNetworks.get(name)?.capability, callHandler, turnState, exportGame, importGame, turnSettled, castAnnotated, castAssetSources, gameRemoved, mediaRemoved, onPictureReady, imageGates,
+  return Object.freeze({ resolveReadCapability, hostBehavior, gameModes, bodyGenerators, taskCatalog, service, mvuProvider, mvuProviderActive, mvuProviderRegistered, capabilities, toolModesFor, toolSkillsFor, toolNetworkFor: name => toolNetworks.get(name)?.capability, callHandler, turnState, exportGame, importGame, turnSettled, castAnnotated, castAssetSources, gameRemoved, mediaRemoved, onPictureReady, imageGates, collectDamperQuestions,
     listGalleryProviderItems, readGalleryProviderImage, removeGalleryProviderItems,
     // The asset library's access to the 配图 人物库 records (registerImageLibrary schema 4); outside any card.
     imageCharacters: (op, input) => imageCatalog.record(op, {}, input),
@@ -2164,6 +2370,6 @@ export function createTavernPluginApi(deps) {
       return register.call({ctx},sections,'dsh-tavern\u0000'+target+'\u0000'+name,
         {owner:'dsh-tavern',name,target,text,unbounded},'tavern builtin prompt section','Duplicate built-in prompt section')
     },
-    speechProviders: (capability = 'synthesize') => Array.from(speechProviders.values()).filter(entry => typeof entry[capability] === 'function'), imageProviders: () => Array.from(imageProviders.values()), pricingProviders: () => Array.from(pricingProviders.values()), timelineChanged, checkVersions, pluginState, cardChanged, cardImporterFor, convertCard, cardImported, gameForked, forkTurns, promptSections, turnContext, worldbookPoolEntries, settlement, candidate, compactionNotes, replaceSettlement, replaceLedger,
+    speechProviders: (capability = 'synthesize') => Array.from(speechProviders.values()).filter(entry => typeof entry[capability] === 'function'), imageProviders: () => Array.from(imageProviders.values()), pricingProviders: () => Array.from(pricingProviders.values()), timelineChanged, checkVersions, pluginState, cardChanged, cardImporterFor, convertCard, cardImported, gameForked, forkTurns, promptSections, turnContext, worldbookPoolEntries, worldbookScanTexts, settlement, candidate, compactionNotes, replaceSettlement, replaceLedger,
     runSettlementTasks, manualTaskFor, runManualTask, stopTasks: stopAllTasks, runningTask, gamePlugins, setGamePlugin, resetGamePluginSettings, pluginGameSettings })
 }

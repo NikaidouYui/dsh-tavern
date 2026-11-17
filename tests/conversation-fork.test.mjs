@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { assertConversationForkable } from '../tavern-plugin/lib/domain/conversation-fork.js'
+import vm from './fixtures/client-vm.mjs'
+import { sourceFunction } from './fixtures/source-function.mjs'
 
 function sourceChat() {
   return {
@@ -121,4 +124,89 @@ test('复制完整会话保留有效原生提交映射、同步标记与副本�
   // assertConversationForkable 在 duplicate: true 下给出「复制」语义报错且禁止未产生正文状态。
   assert.throws(() => assertConversationForkable({ mode: 'story', regenInProgress: true, messages: [] }, { duplicate: true }), /再复制/)
   assert.throws(() => assertConversationForkable({ mode: 'story', messages: [{ role: 'user', text: 'hi' }] }, { duplicate: true }), /不能复制/)
+})
+
+const sidebarSource = readFileSync(new URL('../tavern-plugin/src/client/features/sidebar.js', import.meta.url), 'utf8')
+
+function sidebarForkFixture({ storyDirect = false, narrow = false, failPrepare = false } = {}) {
+  const calls = []
+  const errors = []
+  const ctx = vm.createContext({
+    console,
+    isPlayMode: mode => !mode || mode === 'story' || mode === 'script',
+    workspaceId: 'ws-1',
+    playWorkspaceIdRef: { current: 'ws-1' },
+    playWorkspaceResolverRef: { current: async () => 'ws-1' },
+    ensureTavernPreset: async (id, opts) => calls.push(['preset', id, opts]),
+    setMenuSession: value => calls.push(['menu', value]),
+    setBusy: value => calls.push(['busy', value]),
+    setError: value => { errors.push(value); calls.push(['error', value]) },
+    setPendingOpen: value => calls.push(['pending', value]),
+    finishPendingOpen: async value => calls.push(['finishOpen', value]),
+    closeHistoryManager: () => calls.push(['closeManager']),
+    narrowLayout: () => narrow,
+    isMissingSessionArchiveError: () => false,
+    call: async (method, payload) => {
+      calls.push([method, payload])
+      if (method === 'prepareConversationFork') {
+        if (failPrepare) throw new Error('当前正文仍在生成')
+        return {
+          turn: 3, sourceRevision: 8,
+          atSeq: storyDirect ? null : 21,
+          storyDirect,
+          duplicate: Boolean(payload.duplicate)
+        }
+      }
+      return { fork: { sessionId: 'session-copy' } }
+    },
+    props: {
+      conversationHost: {
+        forkSession: async (sessionId, atSeq, opts) => {
+          calls.push(['forkSession', sessionId, atSeq, opts])
+          return 'session-copy'
+        },
+        connectWorkspace: async wsId => {
+          calls.push(['connectWorkspace', wsId])
+          return 'session-copy-direct'
+        }
+      },
+      renameChat: async (sessionId, title) => calls.push(['renameChat', sessionId, title]),
+      renameSession: async (sessionId, title) => calls.push(['renameSession', sessionId, title]),
+      archiveSession: async id => calls.push(['archive', id]),
+      closeNarrowSidebar: () => calls.push(['closeSidebar'])
+    }
+  })
+  vm.runInContext(sourceFunction(sidebarSource, 'forkConversation'), ctx)
+  return { ctx, calls, errors }
+}
+
+test('复制完整会话走原生 fork：不自增标题序号、命名为「· 副本」并在管理面板后收起弹窗', async () => {
+  const { ctx, calls } = sidebarForkFixture({ narrow: true })
+  const item = { chatId: 'chat-1', sessionId: 'session-1', cardName: '铃兰', mode: 'story' }
+  const created = await ctx.forkConversation(item, '夜雨旅店', 0, { duplicate: true, fromManager: true })
+  assert.equal(created, 'session-copy')
+  const normalized = JSON.parse(JSON.stringify(calls))
+  assert.deepEqual(normalized.find(c => c[0] === 'prepareConversationFork'), ['prepareConversationFork', { chatId: 'chat-1', sessionId: 'session-1', duplicate: true }])
+  assert.deepEqual(normalized.find(c => c[0] === 'forkSession'), ['forkSession', 'session-1', 21, { increaseTitle: false }])
+  assert.deepEqual(normalized.find(c => c[0] === 'renameChat'), ['renameChat', 'session-copy', '夜雨旅店 · 副本'])
+  assert.deepEqual(normalized.find(c => c[0] === 'finishOpen'), ['finishOpen', { sessionId: 'session-copy', targetMode: 'story' }])
+  assert.ok(normalized.some(c => c[0] === 'closeManager'))
+  assert.ok(normalized.some(c => c[0] === 'closeSidebar'))
+})
+
+test('复制完整会话在管理面板失败时保持面板打开并给出错误，空前缀安全走 storyDirect', async () => {
+  const failed = sidebarForkFixture({ failPrepare: true })
+  await assert.rejects(
+    () => failed.ctx.forkConversation({ chatId: 'chat-2', sessionId: 'session-2', cardName: '卡2', mode: 'story' }, '标题', 0, { duplicate: true, fromManager: true }),
+    /当前正文仍在生成/
+  )
+  assert.ok(!failed.calls.some(c => c[0] === 'closeManager'))
+  assert.match(failed.errors.at(-1), /复制对话失败：当前正文仍在生成/)
+
+  const fallback = sidebarForkFixture({ storyDirect: true })
+  const fallbackId = await fallback.ctx.forkConversation({ chatId: 'chat-3', sessionId: 'session-3', cardName: '卡3', mode: 'story' }, '', 0, { duplicate: true })
+  assert.equal(fallbackId, 'session-copy-direct')
+  assert.ok(fallback.calls.some(c => c[0] === 'connectWorkspace'))
+  assert.ok(fallback.calls.some(c => c[0] === 'preset' && c[1] === 'session-copy-direct'))
+  assert.deepEqual(fallback.calls.find(c => c[0] === 'renameChat'), ['renameChat', 'session-copy-direct', '卡3的新对话 · 副本'])
 })

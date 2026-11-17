@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { repairNativeSurface, recordNativeSurfaceRepair, planNativeSurfaceRepair } from './native-surface-repair.js'
 import { reshadowRolledBackRounds } from './rollback-surface.js'
-import { clearSurfaceEditTurns, markSurfaceEditTurn, releaseOpeningTurn, sessionEvents, withSuppressedEditLifecycle } from './session-events.js'
+import { clearSurfaceEditTurns, markSurfaceEditTurn, releaseOpeningTurn, reserveStoryTurns, sessionEvents, withSuppressedEditLifecycle } from './session-events.js'
 import { inspectStoryAlignment, nativeStoryTurns } from './story-alignment.js'
 
 function str(value) {
@@ -60,7 +60,12 @@ export function createStoryReconciliation({ agentRegistry, sessionStore, chatFor
   // One explicit use only: a story fork starts a fresh native session that
   // carries no context, so its tail is built from the save once, at fork time.
   // Nothing reconciles or repairs a live session behind the player's back.
-  async function seedNativeStory(sessionId, session, reason) {
+  async function seedNativeStory(sessionId, session, lastStoryTurn, reason) {
+    if (typeof lastStoryTurn === 'string' && reason === undefined) {
+      reason = lastStoryTurn
+      lastStoryTurn = 0
+    }
+    const targetLastStoryTurn = Number.isSafeInteger(Number(lastStoryTurn)) && Number(lastStoryTurn) > 0 ? Number(lastStoryTurn) : 0
     const initialChat = await chatForSession(sessionId)
     if (!initialChat || initialChat.regenInProgress || !['story', 'script'].includes(initialChat.mode || 'story')) return null
     const agent = agentRegistry.get(sessionId)
@@ -101,10 +106,9 @@ export function createStoryReconciliation({ agentRegistry, sessionStore, chatFor
       assertBlankStoryForkTarget(sessionId, session)
       let prefixed = false
       if (typeof ensurePrefix === 'function') {
-        // 先于开场前缀写入前标记轮次 1 为表面编辑轮，避免打开首轮时触发非预期的生命周期副作用。
+        // 先于开场前缀写入前标记轮次 1 为表面编辑轮，保持开放以便按轮播种首轮复用 turn 1。
         markSurfaceEditTurn(session, 1)
         await ensurePrefix(session, initialChat, { flush: false })
-        withSuppressedEditLifecycle(session, () => releaseOpeningTurn(session, agent))
         prefixed = sessionEvents(session).length > beforeEvents.length
       }
       const chat = (await chatForSession(sessionId)) || initialChat
@@ -120,14 +124,21 @@ export function createStoryReconciliation({ agentRegistry, sessionStore, chatFor
         )
         repairNativeSurface(probe, chat, { repairId, perRound: true, seeded: true })
       }
-      const result = withSuppressedEditLifecycle(session, () =>
-        repairNativeSurface(session, chat, { repairId, perRound: true, seeded: true })
-      )
+      const result = withSuppressedEditLifecycle(session, () => {
+        const applied = repairNativeSurface(session, chat, { repairId, perRound: true, seeded: true })
+        releaseOpeningTurn(session, agent)
+        return applied
+      })
+      if (result.applied && targetLastStoryTurn > 0) {
+        reserveStoryTurns(session, targetLastStoryTurn, agent)
+      }
       // 同步推进 idle Agent 的 lastTurn（不强依赖全局 agentLookup），防止分叉后首条玩家消息撞上刚播种的轮号。
       if (result.applied && agent?.phase?.kind === 'idle') {
         const highestTurn = sessionEvents(session).reduce((highest, event) =>
           event?.type === 'turn/start' ? Math.max(highest, Number(event.data?.turn) || 0) : highest, 0)
-        if (highestTurn > 0) agent.phase.lastTurn = Math.max(Number(agent.phase.lastTurn) || 0, highestTurn)
+        if (highestTurn > 0 || targetLastStoryTurn > 0) {
+          agent.phase.lastTurn = Math.max(Number(agent.phase.lastTurn) || 0, highestTurn, targetLastStoryTurn)
+        }
       }
       const hasSessionWrites = result.applied || sessionEvents(session).length > beforeEvents.length
       if (hasSessionWrites) await sessionStore.flush(session)

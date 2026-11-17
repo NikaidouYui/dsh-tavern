@@ -1,9 +1,9 @@
 import { effectiveNarrator } from './card-stage-settings.js'
-import { figureTtsVoice, catalogueTtsVoice, figureRefTtsVoice } from './figure-voice.js'
+import { figureRefTtsVoice } from './figure-voice.js'
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '../../packages/dsh-presentation-protocol/src/asset-pack-json.js'
 
-// 台词朗读 (the 🔊 on a reply, and plugins' synthesizeSpeech): every line is spoken by the voice service (tts). Tavern keeps
+// 台词朗读 (plugins' speak and synthesizeSpeech) and 有声书's reading voice: every line is spoken by the voice service (tts). Tavern keeps
 // no speech channels or audio cache of its own; plugin speech providers join the voice service as its providers.
 
 const MAX_TEXT = 1000
@@ -50,53 +50,30 @@ export function createLineSpeech({ getTts, getLibrary }) {
   const url = (tts, ticket, loudness) => ({ url: tts.audioUrl(ticket), mediaType: 'audio/wav', ...(loudness ? { loudness } : {}) })
   const mood = emotion => !emotion || emotion === 'neutral' ? 'default' : emotion
 
-  // A browser system voice or a configured service's voice ({serviceId, voice}, the voice picker's shapes); null = the
-  // browser's default voice. A preset service voice registers as the one-source voice the stage's narrator uses (same
-  // source id, so their audio is shared); a catalogue voice of a 'service' provider (a plugin's channel) speaks by its id.
-  function openBinding(tts, { serviceId, voice: name }) {
-    const key = JSON.stringify([serviceId, name])
-    if (!voices.has(key)) {
-      const opening = (async () => {
-        const kind = (await tts.listServices()).find(row => row.id === serviceId)?.kind
-        if (!kind) throw failure('SERVICE_OFFLINE')
-        if (kind === 'service') return { voiceId: name, grant: tts.grantServiceConsumer({ principal: PRINCIPAL, scope: SCOPE }) }
-        const spec = { name: '旁白', language: 'zh', defaultSource: 'narrator',
-          sources: { narrator: kind === 'fish-audio' ? { kind: 'voice-id', provider: kind, voiceId: name } : { kind: 'preset', provider: kind, voiceName: name } } }
-        const voice = figureTtsVoice({ voice: 'narrator' }, spec, 'narrator'), binding = { serviceId }
-        const revision = voiceDigest({ voice, readings: [], binding, id: name, language: 'zh' }), sourceId = `narrator:${revision}`
-        const source = tts.registerVoiceSource({ owner: 'dsh-tavern', sourceId, revision, voices: [voice], bindings: { voice: serviceId },
-          readReference: async () => { throw failure('MISSING_REFERENCE') } })
-        try { return { ref: { source: sourceId, id: 'voice' }, source, grant: tts.grantConsumer({ principal: PRINCIPAL, source: sourceId, scope: SCOPE }) } }
-        catch (error) { source.dispose(); throw error }
-      })()
-      voices.set(key, opening)
-      opening.catch(() => { if (voices.get(key) === opening) voices.delete(key) })
+  // A library figure's voice as a registered reading source: {sourceId, grant, language, warmed}, {browser, language}, or null
+  // (「不配音」). One registration per voice revision, shared by 通用声音 / 旁白 lines and 有声书's reading voice.
+  async function openFigureRef(tts, figure) {
+    const selected = await figureRefTtsVoice(getLibrary(), tts, figure)
+    if (!selected) return null
+    if (selected.browser !== undefined) return {browser:selected.browser, language:selected.language || 'zh'}
+    const revision = voiceDigest({voice:selected.voice, binding:selected.binding, revision:selected.revision})
+    const sourceId = 'reading:' + revision
+    if (!voices.has(sourceId)) {
+      const source = tts.registerVoiceSource({owner:'dsh-tavern', sourceId, revision, voices:[selected.voice], bindings:{voice:selected.binding.serviceId}, readReference:selected.readReference})
+      try { voices.set(sourceId, Promise.resolve({source, grant:tts.grantConsumer({principal:PRINCIPAL, source:sourceId, scope:SCOPE}), warmed:false})) }
+      catch (error) { source.dispose(); throw error }
     }
-    return voices.get(key)
+    const entry = await voices.get(sourceId)
+    return {sourceId, grant:entry.grant, language:selected.voice.languages[0], entry}
   }
-  async function bindingLine(tts, binding, text, emotion) {
-    if (binding?.silent) return {skip:true, reason:'silent'}
-    // 通用声音 / 旁白 ({figure}: the figure tts.reading() points at) in its own 配音语言; a pack voice or template (全文朗读) in 中文.
-    if (binding && Object.hasOwn(binding,'figure') || binding?.templateId || binding?.voiceId) {
-      const selected = Object.hasOwn(binding,'figure') ? await figureRefTtsVoice(getLibrary(),tts,binding.figure) : await catalogueTtsVoice(getLibrary(),tts,binding)
-      if (!selected) return {skip:true, reason:'silent'}
-      if (selected.browser !== undefined) return {browser:true,voice:selected.browser,text}
-      const revision = voiceDigest({voice:selected.voice,binding:selected.binding,revision:selected.revision})
-      const sourceId = 'reading:' + revision
-      if (!voices.has(sourceId)) {
-        const source = tts.registerVoiceSource({owner:'dsh-tavern',sourceId,revision,voices:[selected.voice],bindings:{voice:selected.binding.serviceId},readReference:selected.readReference})
-        try { voices.set(sourceId,Promise.resolve({source,grant:tts.grantConsumer({principal:PRINCIPAL,source:sourceId,scope:SCOPE})})) }
-        catch (error) { source.dispose(); throw error }
-      }
-      const {grant} = await voices.get(sourceId)
-      const result = await tts.synthesize({voice:{source:sourceId,id:'voice'},text,mood:mood(emotion),language:selected.voice.languages[0]},{grant:grant.grant,scope:SCOPE})
-      return url(tts,await tts.createAudioTicket({key:result.key,grant:grant.grant}),result.loudness)
-    }
-    if (!binding || binding.browser !== undefined) return { browser: true, voice: binding?.browser || '', text }
-    const opened = await openBinding(tts, binding)
-    const input = opened.voiceId ? { voiceId: opened.voiceId, text, language: 'zh' } : { voice: opened.ref, mood: mood(emotion), text, language: 'zh' }
-    const result = await tts.synthesize(input, { grant: opened.grant.grant, scope: SCOPE })
-    return url(tts, await tts.createAudioTicket({ key: result.key, grant: opened.grant.grant }), result.loudness)
+  // 通用声音 / 旁白: the figure tts.reading() points at, in its own 配音语言 (null figure = the browser's default voice).
+  async function figureRefLine(tts, figure, text, emotion) {
+    const opened = await openFigureRef(tts, figure)
+    if (!opened) return {skip:true, reason:'silent'}
+    if (opened.browser !== undefined) return {browser:true, voice:opened.browser, text}
+    const {sourceId, grant, language} = opened
+    const result = await tts.synthesize({voice:{source:sourceId, id:'voice'}, text, mood:mood(emotion), language}, {grant:grant.grant, scope:SCOPE})
+    return url(tts, await tts.createAudioTicket({key:result.key, grant:grant.grant}), result.loudness)
   }
   // A figure's (or the card's narrator's) voice through the card's asset-pack speech; null when she has none here.
   async function figureLine(tts, figures, alias, text, emotion) {
@@ -126,25 +103,33 @@ export function createLineSpeech({ getTts, getLibrary }) {
     if (narration) {
       if (figures) return await figureLine(tts, figures, NARRATOR_ALIAS, text, emotion) || { skip: true, reason: 'narration' }
       if (!effectiveNarrator(extension, tts.reading().narrator).enabled) return { skip: true, reason: 'narration' }
-      return bindingLine(tts, { figure: tts.reading().narrator.figure }, text, emotion)
+      return figureRefLine(tts, tts.reading().narrator.figure, text, emotion)
     }
     const name = String(speaker || '').trim()
     if (figures && name && await figures.voiced(name)) {
       const spoken = await figureLine(tts, figures, name, text, emotion)
       if (spoken) return spoken
     }
-    return bindingLine(tts, { figure: tts.reading().general.figure }, text, emotion)
+    return figureRefLine(tts, tts.reading().general.figure, text, emotion)
   }
   return Object.freeze({
     async speak(line) { active++; try { return await speak(line) } finally { active-- } },
-    async read({text: raw} = {}) {
-      active++
-      try {
-        const tts = serviceOf()
-        if (!tts) return TTS_UNAVAILABLE
-        const text = speechText(raw)
-        return text ? await bindingLine(tts, tts.reading().readAloud.voice, text) : {skip:true, reason:'empty'}
-      } finally { active-- }
+    // 有声书's reading voice: a library figure ({packId, figureId}; undefined = the one 旁白声音 points at, null = the browser's
+    // default voice) as the browser plays it (pack-playback's descriptor: the scoped voice ref, or a system voice). The first open
+    // of a voice warms it, so the first sentence does not wait for its reference to encode.
+    async openReading(figure) {
+      const tts = serviceOf()
+      if (!tts) return {available:false, diagnostics:['TTS_UNAVAILABLE']}
+      let opened
+      try { opened = await openFigureRef(tts, figure === undefined ? tts.reading().narrator.figure : figure) }
+      catch (error) { return {available:false, diagnostics:[error.code || 'VOICE_NOT_FOUND']} }
+      if (!opened) return {available:false, diagnostics:['silent']}
+      if (opened.browser !== undefined) return {available:true, browser:{voice:opened.browser}, language:opened.language, scope:SCOPE, diagnostics:[]}
+      if (!opened.entry.warmed) {
+        opened.entry.warmed = true
+        tts.prewarm({voice:{source:opened.sourceId, id:'voice'}, language:opened.language}, {scope:SCOPE, grant:opened.grant.grant}).catch(() => {})
+      }
+      return {available:true, voice:{source:opened.sourceId, id:'voice'}, language:opened.language, scope:SCOPE, diagnostics:[]}
     },
     pendingCount: () => active,
     dispose: reset

@@ -337,6 +337,25 @@ export function skeletonizeForSafetyFallback({ stateSnapshot, posture, userText,
   ].filter(Boolean).join('\n')
 }
 
+// 通用决策输入的 R18 分级脱敏：full（词汇替换） -> skeleton（动作尺度标签化） -> digest（纯结构节拍摘要，彻底剥离原文）
+function buildGenericJudgeLadder(rawInput) {
+  const fullText = desensitizeForDecisionJudge(rawInput)
+  const beats = summarizeBeatsForDecisionJudge(rawInput)
+  const skeletonMasked = fullText
+    .replace(/[\u4e00-\u9fa5A-Za-z]{0,2}(?:逼迫|强行|按住|锁门|撕开|解开|跪下|按倒|压住|掐住|扯住|推倒)[\u4e00-\u9fa5A-Za-z]{0,2}/g, '[强势肢体尝试]')
+    .slice(0, 4000)
+  const skeletonText = [
+    skeletonMasked,
+    beats.summary ? `【结构特征】${beats.summary}` : ''
+  ].filter(Boolean).join('\n')
+  const digestText = [
+    '【判定素材 · 结构化脱敏摘要（自然语言原文已剥离，仅保留判定所需结构与风险强度特征）】',
+    beats.lines.length ? beats.lines.join('\n') : 'S1｜类别=常规交互｜强度=低｜指向他角色=无｜含台词=无',
+    beats.summary ? `【结构特征汇总】${beats.summary}` : ''
+  ].filter(Boolean).join('\n')
+  return { full: fullText, skeleton: skeletonText, digest: digestText }
+}
+
 export function isExplicitSceneShiftInput(userText) {
   return /^\s*(?:「场景变化」|【场景变化】|\[场景变化\]|\(场景变化\)|（场景变化）)/u.test(str(userText))
 }
@@ -616,6 +635,27 @@ export function normalizeDecisionRuling(rawDecision, config) {
   }
 }
 
+// 外部检定插件（真骰）回传的五档结果，用于把阻尼裁定与结算配额反向对齐
+export const DAMPER_DICE_TIERS = Object.freeze(['critical', 'success', 'costly', 'failure', 'fumble'])
+export const DAMPER_DICE_TIER_LABELS = Object.freeze({
+  critical: '大成功',
+  success: '成功',
+  costly: '代价成功',
+  failure: '失败',
+  fumble: '大失败'
+})
+const TIER_LABELS = DAMPER_DICE_TIER_LABELS
+
+// 真骰联动行：只在 ruling.diceShift 存在时追加到 </turn_ruling> 之前
+function diceShiftLine(ruling) {
+  const shift = ruling && typeof ruling === 'object' ? ruling.diceShift : null
+  if (!shift || typeof shift !== 'object') return ''
+  const label = TIER_LABELS[str(shift.tier)] || str(shift.tier)
+  if (!label) return ''
+  const check = str(shift.check) || '行动'
+  return `- 命运检定联动：本轮「${check}」真骰裁定为【${label}】，推进尺度与状态结算配额已同步对齐（${str(ruling.rulingTier)} / ${str(ruling.deltaBudget)}）。`
+}
+
 function compileAuthorTurnRuling(ruling, { stateLine, postureLine }) {
   const tier = str(ruling && ruling.rulingTier)
   const score = Number(ruling?.leverageScore || 1).toFixed(2)
@@ -674,7 +714,15 @@ function compileAuthorTurnRuling(ruling, { stateLine, postureLine }) {
   ].join('\n')
 }
 
-export function compileTurnRuling(ruling, { stateSnapshot, posture, explicitSceneShift = false } = {}) {
+// 真骰联动行统一在这里拼到闭合标签之前，roleplay 与 author 两个分支都覆盖
+export function compileTurnRuling(ruling, options = {}) {
+  const text = compileTurnRulingBody(ruling, options)
+  const shiftLine = diceShiftLine(ruling)
+  if (!shiftLine) return text
+  return text.replace(/<\/turn_ruling>$/, shiftLine + '\n</turn_ruling>')
+}
+
+function compileTurnRulingBody(ruling, { stateSnapshot, posture, explicitSceneShift = false } = {}) {
   const stateLine = compactStateSummary(stateSnapshot)
   const postureLine = str(posture).trim() ? `；现场姿势锚点：${str(posture).trim().slice(0, 140)}` : ''
   if (explicitSceneShift) {
@@ -979,31 +1027,94 @@ function buildJudgeMaterial({ chat, card, userText, stateSnapshot, config, exclu
   return config.desensitizeR18 !== false ? desensitizeForDecisionJudge(rawMaterial) : rawMaterial
 }
 
-function buildProviderRequest(config, material, customBinaryQuestions = null) {
+// 附加题合并上限：单趟请求里最多带 8 个插件批次、16 道附加题
+const MAX_MERGED_PLUGIN_BATCHES = 8
+const MAX_MERGED_PLUGIN_QUESTIONS = 16
+
+// 把插件附加题规范化并按 plg_<idx>_<id> 分配内部键名；单个插件不合法/协议不支持时只跳过该插件
+function normalizeExtraQuestionBatches(extraQuestions, protocol) {
+  const batches = []
+  if (!Array.isArray(extraQuestions) || !extraQuestions.length) return batches
+  let total = 0
+  for (const raw of extraQuestions) {
+    if (batches.length >= MAX_MERGED_PLUGIN_BATCHES || total >= MAX_MERGED_PLUGIN_QUESTIONS) break
+    const item = object(raw)
+    const owner = str(item.owner).trim()
+    if (!owner) continue
+    let normalized
+    try {
+      normalized = normalizePluginQuestions(item.questions, protocol)
+    } catch {
+      // 题目不合法或当前协议不支持该题型：只丢这个插件的题，阻尼器主判定照常进行
+      continue
+    }
+    const room = MAX_MERGED_PLUGIN_QUESTIONS - total
+    const picked = normalized.slice(0, room)
+    if (!picked.length) continue
+    const index = batches.length
+    batches.push({
+      owner,
+      questions: picked.map(q => ({ ...q, id: `plg_${index}_${q.id}`, localId: q.id }))
+    })
+    total += picked.length
+  }
+  return batches
+}
+
+function mergeExtraQuestions(target, extraBatches) {
+  for (const batch of extraBatches || []) {
+    for (const q of batch.questions) {
+      target[q.id] = q.type === 'noul'
+        ? { type: 'noul', instructions: q.instructions }
+        : { type: q.type, instructions: q.instructions, criteria: q.criteria }
+    }
+  }
+}
+
+// 同一份响应里按插件批次解析附加题答案；单插件解析异常只置空该插件，不影响阻尼主结果
+function parseMergedPluginAnswers(protocol, data, extraBatches) {
+  const result = {}
+  if (!data || !Array.isArray(extraBatches) || !extraBatches.length) return result
+  for (const batch of extraBatches) {
+    try {
+      const parsed = parsePluginDecisionResponse(protocol, data, batch.questions)
+      const answers = {}
+      for (const q of batch.questions) {
+        if (parsed[q.id] !== undefined) answers[q.localId] = parsed[q.id]
+      }
+      result[batch.owner] = answers
+    } catch {
+      result[batch.owner] = null
+    }
+  }
+  return result
+}
+
+function buildProviderRequest(config, material, customBinaryQuestions = null, extraBatches = null) {
   const url = damperEndpointUrl(config)
   if (!url) return null
   const protocol = DAMPER_PROVIDERS[config.provider]?.protocol || 'gemini'
   if (protocol === 'gemini') {
     const questions = customBinaryQuestions
       ? Object.fromEntries(customBinaryQuestions.map(q => [q.id, { type: 'noul', instructions: q.text }]))
-      : damperQuestionSet(config)
+      : { ...damperQuestionSet(config) }
+    mergeExtraQuestions(questions, extraBatches)
     const body = JSON.stringify({ model: config.model, input: material, questions })
     return { protocol, url, body, authHeader: key => ({ 'x-goog-api-key': key, 'Content-Type': 'application/json' }) }
   }
   const list = customBinaryQuestions || damperBinaryQuestionSet(config)
   if (protocol === 'jev') {
-    const body = JSON.stringify({
-      model: config.model,
-      state: material,
-      questions: Object.fromEntries(list.map(q => [q.id, { type: 'noul', instructions: q.text }]))
-    })
+    const questions = Object.fromEntries(list.map(q => [q.id, { type: 'noul', instructions: q.text }]))
+    // jev 只支持 noul 是非概率题，附加题已在规范化阶段按协议过滤
+    mergeExtraQuestions(questions, extraBatches)
+    const body = JSON.stringify({ model: config.model, state: material, questions })
     return { protocol, url, body, authHeader: key => ({ Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }) }
   }
-  const body = JSON.stringify({
-    model: config.model,
-    input: material,
-    questions: list.map(q => ({ type: 'predicate', name: q.id, instructions: q.text }))
-  })
+  const questions = list.map(q => ({ type: 'predicate', name: q.id, instructions: q.text }))
+  for (const batch of extraBatches || []) {
+    for (const q of batch.questions) questions.push({ type: 'predicate', name: q.id, instructions: q.instructions })
+  }
+  const body = JSON.stringify({ model: config.model, input: material, questions })
   return { protocol, url, body, authHeader: key => ({ Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }) }
 }
 
@@ -1048,6 +1159,175 @@ function parseTurnDecisionResponse(protocol, data, config = null) {
   else if (rulingTier === 'strip_delusion' || rulingTier === 'resist_pushback') deltaBudget = 'frozen'
   else if (strongLeverage >= 0.72 && overreaches < 0.7) deltaBudget = 'breakthrough'
   return { godmode, retcon, epistemic, leverageScore, rulingTier, deltaBudget, overreachProb: overreaches }
+}
+
+const PLUGIN_QUESTION_ID = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+const PLUGIN_CHOICE_KEY = /^[A-Za-z0-9_.-]{1,64}$/
+const PLUGIN_QUESTION_TYPES = new Set(['noul', 'choice', 'score'])
+
+function extractDecisionUsage(body) {
+  if (!body?.usage || typeof body.usage !== 'object') return undefined
+  return {
+    inputTokens: Number(body.usage.total_input_tokens ?? body.usage.input_tokens ?? 0),
+    outputTokens: Number(body.usage.total_output_tokens ?? body.usage.output_tokens ?? 0)
+  }
+}
+
+function judgeProtocolFor(config) {
+  return DAMPER_PROVIDERS[config?.provider]?.protocol || 'gemini'
+}
+
+function judgeCapabilitiesForProtocol(protocol) {
+  return {
+    noul: true,
+    choice: protocol === 'gemini',
+    score: protocol === 'gemini'
+  }
+}
+
+// 校验并规范化插件传入的决策题目清单，按当前协议阻断不支持的题型
+function normalizePluginQuestions(questions, protocol) {
+  if (!Array.isArray(questions) || !questions.length || questions.length > 16) {
+    throw error('DAMPER_INVALID_INPUT', 'questions 必须为 1 至 16 条题目组成的数组')
+  }
+  const seen = new Set()
+  const supportsStructured = protocol === 'gemini'
+  return questions.map((raw, index) => {
+    const item = object(raw)
+    const id = str(item.id).trim()
+    if (!PLUGIN_QUESTION_ID.test(id)) {
+      throw error('DAMPER_INVALID_INPUT', `第 ${index + 1} 题的 id 格式无效`)
+    }
+    if (seen.has(id)) {
+      throw error('DAMPER_INVALID_INPUT', `题目 id 重复：${id}`)
+    }
+    seen.add(id)
+    const type = item.type === undefined ? 'noul' : str(item.type).trim()
+    if (!PLUGIN_QUESTION_TYPES.has(type)) {
+      throw error('DAMPER_INVALID_INPUT', `未知题型：${type}`)
+    }
+    if (type !== 'noul' && !supportsStructured) {
+      throw error('DAMPER_UNSUPPORTED_QUESTION_TYPE', `当前决策模型协议（${protocol}）仅支持 noul 是非概率题，暂不支持 ${type}`)
+    }
+    const instructions = str(item.instructions).trim()
+    if (!instructions || instructions.length > 2000) {
+      throw error('DAMPER_INVALID_INPUT', `题目 ${id} 的 instructions 必须为 1 至 2000 字符的非空文本`)
+    }
+    if (type === 'noul') return { id, type, instructions }
+    if (type === 'score') {
+      if (!Array.isArray(item.criteria) || item.criteria.length < 2 || item.criteria.length > 10) {
+        throw error('DAMPER_INVALID_INPUT', `score 题目 ${id} 的 criteria 必须为 2 至 10 项字符串数组`)
+      }
+      const criteria = item.criteria.map(entry => str(entry).trim())
+      if (criteria.some(text => !text || text.length > 500)) {
+        throw error('DAMPER_INVALID_INPUT', `score 题目 ${id} 的每项档位说明必须为 1 至 500 字符`)
+      }
+      return { id, type, instructions, criteria }
+    }
+    const rawCriteria = object(item.criteria)
+    const keys = Object.keys(rawCriteria)
+    if (keys.length < 2 || keys.length > 30) {
+      throw error('DAMPER_INVALID_INPUT', `choice 题目 ${id} 的 criteria 必须包含 2 至 30 个选项键`)
+    }
+    const criteria = {}
+    for (const key of keys) {
+      if (!PLUGIN_CHOICE_KEY.test(key)) {
+        throw error('DAMPER_INVALID_INPUT', `choice 题目 ${id} 的选项键格式无效：${key}`)
+      }
+      const desc = str(rawCriteria[key]).trim()
+      if (!desc || desc.length > 500) {
+        throw error('DAMPER_INVALID_INPUT', `choice 题目 ${id} 的选项 ${key} 说明必须为 1 至 500 字符`)
+      }
+      criteria[key] = desc
+    }
+    return { id, type, instructions, criteria }
+  })
+}
+
+function buildPluginDecisionRequest(config, material, questions) {
+  const url = damperEndpointUrl(config)
+  if (!url) return null
+  const protocol = judgeProtocolFor(config)
+  if (protocol === 'gemini') {
+    const questionMap = Object.fromEntries(questions.map(q => [
+      q.id,
+      q.type === 'noul'
+        ? { type: 'noul', instructions: q.instructions }
+        : { type: q.type, instructions: q.instructions, criteria: q.criteria }
+    ]))
+    const body = JSON.stringify({ model: config.model, input: material, questions: questionMap })
+    return { protocol, url, body, authHeader: key => ({ 'x-goog-api-key': key, 'Content-Type': 'application/json' }) }
+  }
+  if (protocol === 'jev') {
+    const questionMap = Object.fromEntries(questions.map(q => [q.id, { type: 'noul', instructions: q.instructions }]))
+    const body = JSON.stringify({ model: config.model, state: material, questions: questionMap })
+    return { protocol, url, body, authHeader: key => ({ Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }) }
+  }
+  const body = JSON.stringify({
+    model: config.model,
+    input: material,
+    questions: questions.map(q => ({ type: 'predicate', name: q.id, instructions: q.instructions }))
+  })
+  return { protocol, url, body, authHeader: key => ({ Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }) }
+}
+
+function parsePluginDecisionResponse(protocol, data, questions) {
+  const answers = {}
+  if (protocol === 'gemini') {
+    const rawAnswers = object(data?.answers)
+    for (const q of questions) {
+      const entry = object(rawAnswers[q.id])
+      const confidence = Number(entry.confidence)
+      const extra = Number.isFinite(confidence) ? { confidence } : {}
+      if (q.type === 'noul') {
+        const probability = Number(entry.noul)
+        if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
+          throw error('DAMPER_INVALID_RESPONSE', `决策模型返回的题目 ${q.id} 概率无效`)
+        }
+        answers[q.id] = { type: 'noul', probability, ...extra }
+      } else if (q.type === 'score') {
+        const score = Number(entry.score)
+        if (!Number.isFinite(score)) {
+          throw error('DAMPER_INVALID_RESPONSE', `决策模型返回的题目 ${q.id} 评分无效`)
+        }
+        answers[q.id] = { type: 'score', score, ...extra }
+      } else {
+        const choice = str(entry.choice).trim()
+        if (!choice || !Object.hasOwn(q.criteria, choice)) {
+          throw error('DAMPER_INVALID_RESPONSE', `决策模型返回的题目 ${q.id} 选项无效`)
+        }
+        const rawProbs = entry.probabilities && typeof entry.probabilities === 'object' ? entry.probabilities : null
+        let probabilities
+        if (rawProbs) {
+          const clean = {}
+          for (const [k, v] of Object.entries(rawProbs)) {
+            const num = Number(v)
+            if (Object.hasOwn(q.criteria, k) && Number.isFinite(num)) clean[k] = num
+          }
+          if (Object.keys(clean).length) probabilities = clean
+        }
+        answers[q.id] = { type: 'choice', choice, ...(probabilities ? { probabilities } : {}), ...extra }
+      }
+    }
+    return answers
+  }
+  const rawAnswers = protocol === 'jev'
+    ? object(data?.answers)
+    : Object.fromEntries((Array.isArray(data?.answers) ? data.answers : []).map(item => [item?.name, item]))
+  for (const q of questions) {
+    const entry = object(rawAnswers[q.id])
+    const probability = protocol === 'jev' ? Number(entry.noul) : Number(entry.probability)
+    if (!Number.isFinite(probability) || probability < 0 || probability > 1) {
+      throw error('DAMPER_INVALID_RESPONSE', `决策模型返回的题目 ${q.id} 概率无效`)
+    }
+    const confidence = Number(entry.confidence)
+    answers[q.id] = {
+      type: 'noul',
+      probability,
+      ...(Number.isFinite(confidence) ? { confidence } : {})
+    }
+  }
+  return answers
 }
 
 const SAFETY_ERROR_CODES = new Set(['safety', 'prohibited_content', 'blocklist', 'image_safety', 'content_blocked', 'safety_blocked', 'harmful_content', 'sexual_content'])
@@ -1137,10 +1417,10 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
     }
   }
 
-  async function runTurnQuery({ materials, config }) {
+  async function runTurnQuery({ materials, config, extraBatches = null }) {
     const ladder = Array.isArray(materials) && materials.length ? materials : []
     if (!ladder.length) return { ok: false, code: 'DAMPER_INACTIVE', latencyMs: 0, decision: null }
-    const request = buildProviderRequest(config, ladder[0].material)
+    const request = buildProviderRequest(config, ladder[0].material, null, extraBatches)
     if (!request) return { ok: false, code: 'DAMPER_INACTIVE', latencyMs: 0, decision: null }
     const start = performance.now()
     const controller = new AbortController()
@@ -1153,7 +1433,7 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
       for (let index = 0; index < ladder.length; index++) {
         const item = ladder[index]
         judgeTier = item.tier
-        const attempt = index === 0 ? request : buildProviderRequest(config, item.material)
+        const attempt = index === 0 ? request : buildProviderRequest(config, item.material, null, extraBatches)
         if (!attempt) throw error('DAMPER_INACTIVE', '决策接口地址无效')
         try {
           // Each projection tier is cheaper to judge but needs its own round trip: give the
@@ -1178,7 +1458,7 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
       } : undefined
       const stat = { kind: 'narrative-damper', provider: config.provider, model: config.model, code: 'OK', latencyMs, judgeTier, rulingTier: ruling.rulingTier, deltaBudget: ruling.deltaBudget, ...(blockedTiers.length ? { safetyBlockedTiers: blockedTiers } : {}), ...(usage ? { usage } : {}) }
       log(stat)
-      return { ok: true, code: 'OK', latencyMs, ruling, usage, judgeTier, safetyBlockedTiers: blockedTiers, retriedSafetyFallback: blockedTiers.length > 0 }
+      return { ok: true, code: 'OK', latencyMs, ruling, usage, judgeTier, safetyBlockedTiers: blockedTiers, retriedSafetyFallback: blockedTiers.length > 0, body }
     } catch (cause) {
       controller.abort()
       const known = ['DAMPER_TIMEOUT', 'DAMPER_NO_KEY', 'DAMPER_SAFETY_BLOCKED', 'DAMPER_AUTH_ERROR', 'DAMPER_RATE_LIMIT', 'DAMPER_HTTP_ERROR', 'DAMPER_INVALID_RESPONSE']
@@ -1264,13 +1544,17 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
       }
     },
 
-    async evaluateTurn({ chat, card, turn, userText, excludeAssistantIndex = -1 }) {
+    async evaluateTurn({ chat, card, turn, userText, excludeAssistantIndex = -1, extraQuestions = [] }) {
       const activeKey = chat?.id ? `${chat.id}:${Number(turn) || 0}` : ''
       if (activeKey) activeTurnRulings.delete(activeKey)
       const config = normalizeNarrativeDamperConfig(await getConfig())
       if (!config.enabled || !chat || !['story', 'script'].includes(chat.mode || 'story')) return null
       const trimmedInput = str(userText).trim()
       if (!trimmedInput) return null
+      const protocol = judgeProtocolFor(config)
+      const posture = str(chat.posture)
+      // 插件附加题与阻尼器自身题目合并进同一趟请求；题目不合法或协议不支持的插件单独跳过
+      const extraBatches = normalizeExtraQuestionBatches(extraQuestions, protocol)
 
       const effectiveThreshold = config.mode === 'strict'
         ? Math.max(0.5, Math.round((config.godmodeThreshold - 0.08) * 100) / 100)
@@ -1301,7 +1585,7 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
           stateKind: stateSnapshot.kind,
           latencyMs: 0
         })
-        if (activeKey) rememberCache(activeTurnRulings, activeKey, { ruling: sceneRuling, outcome, stateSnapshot })
+        if (activeKey) rememberCache(activeTurnRulings, activeKey, { ruling: sceneRuling, rulingText, outcome, stateSnapshot, posture, pluginAnswers: {} })
         return { ruling: sceneRuling, rulingText, stateSnapshot, outcome }
       }
 
@@ -1312,6 +1596,10 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
         posture: str(chat.posture),
         state: stateSnapshot,
         input: trimmedInput,
+        extra: extraBatches.map(batch => ({
+          owner: batch.owner,
+          questions: batch.questions.map(q => ({ id: q.id, type: q.type, instructions: q.instructions, criteria: q.criteria ?? null }))
+        })),
         config: {
           mode: config.mode,
           judgeMode: config.judgeMode,
@@ -1335,7 +1623,8 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
           stateKind: stateSnapshot.kind,
           latencyMs: 0
         })
-        if (activeKey) rememberCache(activeTurnRulings, activeKey, { ruling: cached.ruling, outcome, stateSnapshot })
+        const pluginAnswers = cached.pluginAnswers || {}
+        if (activeKey) rememberCache(activeTurnRulings, activeKey, { ruling: structuredClone(cached.ruling), rulingText: cached.rulingText, outcome, stateSnapshot, posture, pluginAnswers: structuredClone(pluginAnswers) })
         return { ...cached, stateSnapshot, outcome }
       }
 
@@ -1363,7 +1652,7 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
             ? skeletonizeForSafetyFallback({ stateSnapshot: stateSnapshot.data, posture: chat.posture, userText: trimmedInput, config })
             : material
       }))
-      const queryResult = await runTurnQuery({ materials, config })
+      const queryResult = await runTurnQuery({ materials, config, extraBatches })
       if (Array.isArray(queryResult.safetyBlockedTiers) && queryResult.safetyBlockedTiers.length) {
         safetySticky.set(`${config.provider}:${config.model}:${config.baseUrl}`, Date.now() + 90_000)
       }
@@ -1382,10 +1671,12 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
             ? { safetyBlockedTiers: queryResult.safetyBlockedTiers.slice() }
             : {})
         }
-        if (activeKey) rememberCache(activeTurnRulings, activeKey, { ruling: null, outcome, stateSnapshot })
+        if (activeKey) rememberCache(activeTurnRulings, activeKey, { ruling: null, rulingText: '', outcome, stateSnapshot, posture, pluginAnswers: {} })
         return { ruling: null, rulingText: '', stateSnapshot, outcome }
       }
 
+      // 同一份响应里先由阻尼器自身题目定案，再按插件批次取附加题答案
+      const pluginAnswers = parseMergedPluginAnswers(protocol, queryResult.body, extraBatches)
       const rulingText = compileTurnRuling(queryResult.ruling, { stateSnapshot, posture: chat.posture, explicitSceneShift: false })
       const outcome = summarizeDamperRulingOutcome(queryResult.ruling, {
         source: 'model',
@@ -1398,12 +1689,12 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
         safetyBlockedTiers: queryResult.safetyBlockedTiers,
         retriedSafetyFallback: queryResult.retriedSafetyFallback
       })
-      const entry = { ruling: queryResult.ruling, rulingText }
+      const entry = { ruling: queryResult.ruling, rulingText, pluginAnswers }
       rememberCache(decisionCache, cacheFingerprint, entry, 96)
-      if (activeKey) rememberCache(activeTurnRulings, activeKey, { ruling: queryResult.ruling, outcome, stateSnapshot })
+      // 活动裁定持有独立副本：真骰联动会原地改写它，不能污染缓存里的原始裁定
+      if (activeKey) rememberCache(activeTurnRulings, activeKey, { ruling: structuredClone(queryResult.ruling), rulingText, outcome, stateSnapshot, posture, pluginAnswers: structuredClone(pluginAnswers) })
       return { ...entry, stateSnapshot, outcome }
     },
-
     clearActive() {
       activeTurnRulings.clear()
     },
@@ -1421,6 +1712,242 @@ export function createNarrativeDamper({ getConfig, credentials, fetch: send = gl
         if (key.startsWith(prefix)) found = value
       }
       return found
+    },
+
+    // 真骰结果反向调节本轮阻尼配额：只改推进尺度与结算配额，不改写剧情事实
+    applyDiceOutcomeShift({ chatId, turn, owner, tier, check = '', summary = '' } = {}) {
+      const key = `${str(chatId)}:${Number(turn) || 0}`
+      const entry = activeTurnRulings.get(key)
+      if (!entry || !entry.ruling || entry.ruling.explicitSceneShift === true) {
+        return { applied: false, ruling: entry?.ruling ? structuredClone(entry.ruling) : null }
+      }
+      if (!DAMPER_DICE_TIERS.includes(tier)) {
+        throw error('DAMPER_INVALID_INPUT', 'tier 必须为 critical/success/costly/failure/fumble 之一')
+      }
+      // 防吃书硬边界：越权剥离绝不能被真骰抬成成功；只有非写作模式的大失败能把冻结配额压成反弹
+      if (entry.ruling.rulingTier === 'strip_delusion') {
+        if (tier === 'fumble' && entry.ruling.judgeMode !== 'author' && entry.ruling.deltaBudget === 'frozen') {
+          entry.ruling.deltaBudget = 'backfire'
+          entry.outcome = { ...(entry.outcome || {}), deltaBudget: 'backfire' }
+        }
+        return {
+          applied: false,
+          blockedByViolation: true,
+          ruling: structuredClone(entry.ruling),
+          outcome: entry.outcome ? structuredClone(entry.outcome) : null
+        }
+      }
+      const prevRulingTier = str(entry.ruling.rulingTier)
+      const prevDeltaBudget = str(entry.ruling.deltaBudget)
+      const tierOf = prevRulingTier
+      const budgetOf = prevDeltaBudget
+      if (tier === 'critical') {
+        if (tierOf === 'resist_pushback') entry.ruling.rulingTier = 'conflicted_half_step'
+        else if (tierOf === 'costly_advance' || tierOf === 'conflicted_half_step') entry.ruling.rulingTier = 'full_accept'
+        if (budgetOf === 'frozen' || budgetOf === 'backfire') entry.ruling.deltaBudget = 'micro_step'
+        else if (budgetOf === 'micro_step') entry.ruling.deltaBudget = 'breakthrough'
+      } else if (tier === 'success') {
+        if (tierOf === 'resist_pushback') entry.ruling.rulingTier = 'costly_advance'
+        if (budgetOf === 'frozen' || budgetOf === 'backfire') entry.ruling.deltaBudget = 'micro_step'
+      } else if (tier === 'costly') {
+        if (tierOf === 'full_accept' || tierOf === 'resist_pushback') entry.ruling.rulingTier = 'costly_advance'
+        if (budgetOf === 'breakthrough' || budgetOf === 'frozen' || budgetOf === 'backfire') entry.ruling.deltaBudget = 'micro_step'
+      } else if (tier === 'failure') {
+        if (tierOf === 'full_accept' || tierOf === 'conflicted_half_step' || tierOf === 'costly_advance') entry.ruling.rulingTier = 'resist_pushback'
+        entry.ruling.deltaBudget = 'frozen'
+      } else {
+        entry.ruling.rulingTier = 'resist_pushback'
+        entry.ruling.deltaBudget = entry.ruling.judgeMode === 'author' ? 'frozen' : 'backfire'
+      }
+      entry.ruling.diceShift = {
+        owner: str(owner),
+        tier,
+        check: str(check).slice(0, 24),
+        summary: str(summary).slice(0, 140),
+        prevRulingTier,
+        prevDeltaBudget
+      }
+      entry.rulingText = compileTurnRuling(entry.ruling, {
+        stateSnapshot: entry.stateSnapshot,
+        posture: entry.posture,
+        explicitSceneShift: false
+      })
+      entry.outcome = {
+        ...(entry.outcome || {}),
+        rulingTier: entry.ruling.rulingTier,
+        deltaBudget: entry.ruling.deltaBudget,
+        diceShift: structuredClone(entry.ruling.diceShift)
+      }
+      return { applied: true, ruling: structuredClone(entry.ruling), outcome: structuredClone(entry.outcome) }
+    },
+
+    // 供插件在本轮 turnSection 内零延迟读取合并后的附加题答案与阻尼状态（只读克隆）
+    turnContextForPlugin(chatId, turn, owner) {
+      const key = `${str(chatId)}:${Number(turn) || 0}`
+      const entry = activeTurnRulings.get(key)
+      if (!entry) return null
+      return {
+        active: true,
+        turn: Number(turn) || 0,
+        explicitSceneShift: Boolean(entry.ruling?.explicitSceneShift),
+        stateSnapshot: structuredClone(entry.stateSnapshot),
+        posture: entry.posture || '',
+        ruling: entry.ruling ? structuredClone(entry.ruling) : null,
+        outcome: entry.outcome ? structuredClone(entry.outcome) : null,
+        answers: structuredClone(entry.pluginAnswers?.[owner] || null)
+      }
+    },
+
+    // 宿主在 evaluateTurn 之前读取当前协议能力，用来决定收集哪些插件附加题
+    async turnPrepStatus() {
+      const config = normalizeNarrativeDamperConfig(await getConfig())
+      const protocol = judgeProtocolFor(config)
+      return {
+        enabled: config.enabled === true,
+        mode: config.mode,
+        judgeMode: config.judgeMode === 'author' ? 'author' : 'roleplay',
+        protocol,
+        capabilities: judgeCapabilitiesForProtocol(protocol)
+      }
+    },
+
+    // 查询决策模型当前可用性与题型能力，不泄露密钥名称、密钥或自定义地址
+    async judgeStatus() {
+      const config = normalizeNarrativeDamperConfig(await getConfig())
+      const protocol = judgeProtocolFor(config)
+      const capabilities = judgeCapabilitiesForProtocol(protocol)
+      const url = damperEndpointUrl(config)
+      if (!url) {
+        return { available: false, provider: config.provider, model: config.model, capabilities, reason: 'INVALID_CONFIG' }
+      }
+      const apiKey = await resolveCredential(config)
+      if (!apiKey) {
+        return { available: false, provider: config.provider, model: config.model, capabilities, reason: 'NOT_CONFIGURED' }
+      }
+      return { available: true, provider: config.provider, model: config.model, capabilities }
+    },
+
+    // 供开放插件复用的通用决策判定接口，沿用阻尼器的提供方配置、凭据、R18 分级脱敏与安全拒绝降级重试
+    async judge({ input, questions, desensitize, signal, timeoutMs } = {}) {
+      const rawInput = str(input).trim()
+      if (!rawInput || rawInput.length > 24000) {
+        throw error('DAMPER_INVALID_INPUT', 'input 必须为 1 至 24000 字符的非空文本')
+      }
+      if (signal?.aborted) {
+        throw error('DAMPER_ABORTED', '决策请求已取消')
+      }
+      const config = normalizeNarrativeDamperConfig(await getConfig())
+      const protocol = judgeProtocolFor(config)
+      const normalizedQuestions = normalizePluginQuestions(questions, protocol)
+      if (!damperEndpointUrl(config)) {
+        throw error('DAMPER_INVALID_CONFIG', '决策模型配置无效')
+      }
+      const apiKey = await resolveCredential(config)
+      if (!apiKey) {
+        throw error('DAMPER_NO_KEY', '尚未配置决策模型 API Key')
+      }
+      const useDesensitize = desensitize === undefined ? config.desensitizeR18 !== false : Boolean(desensitize)
+      let attempts
+      if (useDesensitize) {
+        const ladder = buildGenericJudgeLadder(rawInput)
+        const risk = damperInputRiskScore(rawInput)
+        let startTier = damperProjectionTier(risk, { desensitizeR18: true })
+        const stickyKey = `${config.provider}:${config.model}:${config.baseUrl}`
+        const stickyActive = (Number(safetySticky.get(stickyKey)) || 0) > Date.now()
+        if (stickyActive && risk >= 1) {
+          startTier = startTier === 'full' ? 'skeleton' : 'digest'
+        }
+        const startIndex = Math.max(0, DAMPER_INPUT_TIERS.indexOf(startTier))
+        attempts = DAMPER_INPUT_TIERS.slice(startIndex).map(tier => ({ tier, material: ladder[tier] }))
+      } else {
+        attempts = [{ tier: 'full', material: rawInput }]
+      }
+      const requestedTimeout = Number(timeoutMs)
+      const budgetMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+        ? Math.max(500, Math.min(30000, Math.round(requestedTimeout)))
+        : Math.max(500, Math.min(30000, Number(config.timeoutMs) || 2500))
+      const start = performance.now()
+      const controller = new AbortController()
+      const onExternalAbort = () => controller.abort()
+      if (signal && typeof signal.addEventListener === 'function') {
+        signal.addEventListener('abort', onExternalAbort, { once: true })
+      }
+      const blockedTiers = []
+      let judgeTier = attempts[0].tier
+      try {
+        let body = null
+        for (let index = 0; index < attempts.length; index++) {
+          const item = attempts[index]
+          judgeTier = item.tier
+          const request = buildPluginDecisionRequest(config, item.material, normalizedQuestions)
+          if (!request) throw error('DAMPER_INVALID_CONFIG', '决策接口地址无效')
+          try {
+            const perAttemptBudget = Math.min(30000, budgetMs + index * 1200)
+            body = await sendAttempt(request, apiKey, perAttemptBudget, controller)
+            break
+          } catch (cause) {
+            const canEscalate = cause?.code === 'DAMPER_SAFETY_BLOCKED'
+              && index < attempts.length - 1
+              && !controller.signal.aborted
+            if (!canEscalate) throw cause
+            blockedTiers.push(item.tier)
+          }
+        }
+        if (!body) throw error('DAMPER_SAFETY_BLOCKED', '决策请求触发输入敏感词拦截')
+        if (blockedTiers.length) {
+          safetySticky.set(`${config.provider}:${config.model}:${config.baseUrl}`, Date.now() + 90_000)
+        }
+        const answers = parsePluginDecisionResponse(protocol, body, normalizedQuestions)
+        const usage = extractDecisionUsage(body)
+        const latencyMs = Math.round(performance.now() - start)
+        log({
+          kind: 'decision-judge',
+          provider: config.provider,
+          model: config.model,
+          code: 'OK',
+          latencyMs,
+          judgeTier,
+          ...(blockedTiers.length ? { safetyBlockedTiers: blockedTiers } : {}),
+          questionCount: normalizedQuestions.length,
+          ...(usage ? { usage } : {})
+        })
+        return {
+          provider: config.provider,
+          model: config.model,
+          latencyMs,
+          judgeTier,
+          ...(blockedTiers.length ? { safetyBlockedTiers: blockedTiers, retriedSafetyFallback: true } : {}),
+          answers,
+          ...(usage ? { usage } : {})
+        }
+      } catch (cause) {
+        controller.abort()
+        const isAborted = Boolean(signal?.aborted) || cause?.code === 'DAMPER_ABORTED'
+        const known = ['DAMPER_TIMEOUT', 'DAMPER_NO_KEY', 'DAMPER_SAFETY_BLOCKED', 'DAMPER_AUTH_ERROR', 'DAMPER_RATE_LIMIT', 'DAMPER_HTTP_ERROR', 'DAMPER_INVALID_RESPONSE', 'DAMPER_UNSUPPORTED_QUESTION_TYPE', 'DAMPER_INVALID_CONFIG', 'DAMPER_INVALID_INPUT']
+        const code = isAborted ? 'DAMPER_ABORTED' : (known.includes(cause?.code) ? cause.code : 'DAMPER_ERROR')
+        const latencyMs = Math.round(performance.now() - start)
+        const safeBlockedTiers = cause?.code === 'DAMPER_SAFETY_BLOCKED' ? blockedTiers.concat(judgeTier) : blockedTiers
+        if (safeBlockedTiers.length) {
+          safetySticky.set(`${config.provider}:${config.model}:${config.baseUrl}`, Date.now() + 90_000)
+        }
+        log({
+          kind: 'decision-judge',
+          provider: config.provider,
+          model: config.model,
+          code,
+          latencyMs,
+          judgeTier,
+          ...(safeBlockedTiers.length ? { safetyBlockedTiers: safeBlockedTiers } : {}),
+          questionCount: normalizedQuestions.length
+        })
+        if (isAborted) throw error('DAMPER_ABORTED', '决策请求已取消')
+        if (cause?.code === code) throw cause
+        throw error(code, str(cause?.message || '决策模型请求失败'))
+      } finally {
+        if (signal && typeof signal.removeEventListener === 'function') {
+          signal.removeEventListener('abort', onExternalAbort)
+        }
+      }
     }
   }
 }

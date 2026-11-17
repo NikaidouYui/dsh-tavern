@@ -10,8 +10,8 @@ const audio = pcmWav(Buffer.alloc(4800))
 const VOICES = '44444444-4444-4444-8444-444444444444'
 // 通用声音 / 旁白 point at a figure of the library (tts.reading general / narrator .figure): figures of one voice-only pack here.
 const at = figureId => figureId ? { packId: VOICES, figureId } : null
-const readingOf = ({ narrator = false, general = null, narratorFigure = null, readAloud = { voice: null, auto: false } } = {}) =>
-  ({ general: { figure: at(general) }, narrator: { enabled: narrator, figure: at(narratorFigure) }, readAloud })
+const readingOf = ({ narrator = false, general = null, narratorFigure = null } = {}) =>
+  ({ general: { figure: at(general) }, narrator: { enabled: narrator, figure: at(narratorFigure) } })
 const OFF = readingOf(), ON = readingOf({ narrator: true })
 const browserVoice = voiceName => ({ name: '朗读', language: 'zh', defaultSource: 'b', sources: { b: { kind: 'preset', provider: 'browser', ...(voiceName ? { voiceName } : {}) } } })
 const minimaxVoice = (language = 'zh') => ({ name: '旁白', language, defaultSource: 'm', sources: { m: { kind: 'preset', provider: 'minimax', serviceId: 'mm', voiceName: 'female-shaonv' } } })
@@ -62,8 +62,8 @@ test('其他台词用通用声音：未选为浏览器默认声音，浏览器�
   assert.deepEqual(await speech.speak({ text: '<br>' }), { skip: true, reason: 'empty' })
 })
 
-test('插件配音渠道接入语音服务：注册为 tavern-plugin:<owner>:<id>，版本即 revision，全文朗读经插件合成并转成 WAV 音频票据', async () => {
-  const calls = [], converted = [], tts = voiceService({ ...OFF, readAloud: { voice: { serviceId: 'tavern-plugin:dsh-edge:edge', voice: 'xiaoxiao' }, auto: false } })
+test('插件配音渠道接入语音服务：注册为 tavern-plugin:<owner>:<id>，版本即 revision，经插件合成并转成 WAV 音频票据', async () => {
+  const calls = [], converted = [], tts = voiceService()
   let entries = [pluginProvider(calls)]
   const bridge = createSpeechProviderBridge({ providers: () => entries, toWav: async (data, mediaType) => { converted.push(mediaType); return audio } })
   const detach = bridge.attach(tts)
@@ -74,15 +74,14 @@ test('插件配音渠道接入语音服务：注册为 tavern-plugin:<owner>:<id
   // Only voices the voice service can address join its catalogue.
   assert.deepEqual((await tts.listServiceVoices()).filter(voice => voice.serviceId === service.id).map(voice => voice.id), ['xiaoxiao'])
 
-  const speech = createLineSpeech({ getTts: () => tts })
-  const reply = await speech.read({ text: '别过来！' })
-  assert.match(reply.url, /^audio:/)
-  assert.equal(reply.mediaType, 'audio/wav')
+  const grant = tts.grantServiceConsumer({ principal: 'dsh-browser', scope: 'dsh-browser' })
+  const result = await tts.synthesize({ voiceId: 'xiaoxiao', text: '别过来！', language: 'zh' }, { grant: grant.grant, scope: 'dsh-browser' })
+  const ticket = await tts.createAudioTicket({ key: result.key, grant: grant.grant })
   assert.equal(calls.length, 1)
   assert.equal(calls[0].voice, 'xiaoxiao')
   assert.equal(calls[0].text, '别过来！')
   assert.deepEqual(converted, ['audio/mpeg'])
-  assert.deepEqual(Buffer.from(await tts.redeemAudioTicket(reply.url.slice(6))), audio)
+  assert.deepEqual(Buffer.from(await tts.redeemAudioTicket(ticket)), audio)
 
   // A plugin that unloads leaves the voice service; another one joins on sync.
   entries = []
@@ -134,4 +133,30 @@ test('通用声音「不配音」或所指人物不在了：未绑定的说话�
   t.after(() => { speech.dispose(); tts.dispose() })
   assert.deepEqual(await speech.speak({ speaker: 'NPC', text: 'Hello.' }), { skip: true, reason: 'silent' })
   await assert.rejects(speech.speak({ narration: true, text: 'Night falls.', extension: { stage: {} } }), { code: 'VOICE_NOT_FOUND' })
+})
+
+// 有声书's reading voice (openReadingVoice): the figure 旁白声音 points at unless one is chosen, as the browser plays it -
+// the scoped voice ref the browser synthesizes through (warmed once), a system voice, or the reason it is silent.
+test('有声书的朗读声音：默认旁白声音，可换人物；服务声音只预热一次，浏览器声音原样给浏览器；不配音或人物不在了说原因', async t => {
+  const prewarmed = []
+  const tts = voiceService(readingOf({ narratorFigure: 'mm-zh' }))
+  tts.registerProvider('test', { id: 'mm', kind: 'minimax', revision: 'r1', capabilities: {}, health: async () => ({ state: 'ready' }), catalog: async () => [], synthesize: async () => audio })
+  const prewarm = tts.prewarm.bind(tts)
+  tts.prewarm = (input, options) => { prewarmed.push(input); return prewarm(input, options) }
+  const speech = createLineSpeech({ getTts: () => tts, getLibrary: () => voiceLibrary({ 'mm-zh': [minimaxVoice('zh')], tingting: [browserVoice('Tingting')], mute: [browserVoice(), { source: null }] }) })
+  t.after(() => { speech.dispose(); tts.dispose() })
+  const opened = await speech.openReading(undefined)
+  assert.equal(opened.available, true)
+  assert.equal(opened.scope, 'dsh-browser')
+  assert.equal(opened.language, 'zh')
+  assert.match(opened.voice.source, /^reading:/)
+  assert.deepEqual(await speech.openReading(undefined), opened, '同一个声音只注册一次')
+  assert.equal(prewarmed.length, 1, '只预热一次')
+  // the browser synthesizes through the scope's grant
+  const grant = tts.grantConsumer({ principal: 'dsh-browser', source: opened.voice.source, scope: 'dsh-browser' })
+  assert.ok((await tts.synthesize({ voice: opened.voice, text: '夜深了。', language: 'zh' }, { grant: grant.grant, scope: 'dsh-browser' })).key)
+  assert.deepEqual(await speech.openReading(at('tingting')), { available: true, browser: { voice: 'Tingting' }, language: 'zh', scope: 'dsh-browser', diagnostics: [] })
+  assert.deepEqual(await speech.openReading(at('mute')), { available: false, diagnostics: ['silent'] })
+  assert.deepEqual(await speech.openReading(at('gone')), { available: false, diagnostics: ['VOICE_NOT_FOUND'] })
+  assert.deepEqual(await createLineSpeech({ getTts: () => null, getLibrary: () => voiceLibrary() }).openReading(undefined), { available: false, diagnostics: ['TTS_UNAVAILABLE'] })
 })

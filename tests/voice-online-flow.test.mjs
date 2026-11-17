@@ -12,14 +12,16 @@ import {createTts} from '../tavern-plugin/packages/dsh-tavern-tts/src/service.js
 import {createServiceSettings} from '../tavern-plugin/packages/dsh-tavern-tts/src/settings.js'
 import {FIGURE_ID} from './fixtures/asset-packs/pack.mjs'
 import {pcmWav} from '../tavern-plugin/packages/dsh-tavern-tts/src/providers/audio.js'
+import {createRequire} from 'node:module'
+const figureResolution=createRequire(import.meta.url)('../tavern-plugin/packages/dsh-presentation-protocol/src/figure-resolution.cjs')
 
 const source=await readFile(new URL('../tavern-plugin/src/client/asset-pack-voice-ui.js',import.meta.url),'utf8')
 const h=(type,props,...children)=>({type,props:props||{},children:children.flat(Infinity).filter(Boolean)})
 const nodes=tree=>tree&&typeof tree==='object'?[tree,...(tree.children||[]).flatMap(nodes)]:[]
 function ui(){
-  const ctx={h,structuredClone,React:{Fragment:'fragment',useState:v=>[v,()=>{}],useRef:v=>({current:v}),useEffect:()=>{}},Button:'button',Glyph:'glyph',Spinner:'spinner',SearchBox:'search',Segmented:'segmented',Popover:'popover',InlineRow:'inline-row',InlineGrid:'inline-grid',InlineField:'inline-field',EmptyState:'empty',Help:'help',sessionStorage:{setItem:()=>{}}}
+  const ctx={h,structuredClone,figureResolution,PackSearchBox:'search',InlineGrid:'inline-grid',React:{Fragment:'fragment',useState:v=>[v,()=>{}],useRef:v=>({current:v}),useEffect:()=>{}},Button:'button',Glyph:'glyph',Spinner:'spinner',SearchBox:'search',Segmented:'segmented',Popover:'popover',InlineRow:'inline-row',InlineGrid:'inline-grid',InlineField:'inline-field',EmptyState:'empty',sessionStorage:{setItem:()=>{}}}
   vm.createContext(ctx);vm.runInContext(source,ctx)
-  vm.runInContext('useVoiceModelStatus=()=>({value:{issues:[]}});useVoiceLoad=()=>({value:{voices:testVoices,models:[]}});this.rows=voiceSourceRows;this.catalogServices=catalogServices;',ctx)
+  vm.runInContext('useVoiceLoad=()=>({value:{voices:testVoices,models:[]}});this.catalogServices=catalogServices;',ctx)
   return ctx
 }
 
@@ -55,14 +57,13 @@ for(const kind of ['minimax','qwen'])test(`${kind} only: new figure -> online vo
   const figureId=pack.manifest.figures[0]
   assert.equal(pack.figures[figureId].voice,undefined)
   const ctx=ui(),voiceId=kind==='minimax'?'female-shaonv':'Cherry'
+  // 新建声音 › this service: its voices are rows; 「使用」 makes the picked one a new voice of the pack the figure speaks with.
   const serviceId=kind==='minimax'?'mm':'qw'
   ctx.testVoices=[{id:voiceId,label:'少女',languages:['zh']},{id:kind==='minimax'?'female-yujie':'Serena',label:'御姐',languages:['zh']}]
   const writer=ctx.useVoiceWriter({binding:{service:library},pack,figure:pack.figures[figureId],setError:message=>assert.equal(message,''),commitVoice:async job=>{const result=await job(pack);pack=result.snapshot;return result}})
-  // a service tab's 使用 makes a new voice of the pack (choose → createVoice); opening the tab writes nothing.
-  const tree=ctx.VoiceProviderVoices({binding:{},figure:pack.figures[figureId],language:'zh',row:{id:'service:'+serviceId,kind,name:kind,serviceId,service:{voiceList:'preset'},ways:[]},preview:{state:null,of:()=>null},choose:made=>writer.createVoice(made)})
-  assert.equal((await library.getPackSnapshot({packId:pack.manifest.id})).figures[figureId].voice,undefined,'nothing is written before 使用')
-  // the service's voices are one list (VoiceServiceVoices); 使用 少女 is what the figure then speaks with.
-  await nodes(tree).find(n=>n.type===ctx.VoiceServiceVoices).props.onUse(ctx.testVoices[0])
+  const list=ctx.VoiceAddVoices({binding:{},service:{id:serviceId,kind,voiceList:'preset'},serviceKind:kind,bind:{},language:'zh',preview:{of:()=>null},candidate:spec=>spec,picked:null,onPick(){},withParams:spec=>spec})
+  const row=list.props.rows.find(r=>r.name==='少女')
+  await writer.createVoice(row.spec)
   const saved=await library.getPackSnapshot({packId:pack.manifest.id}),binding=saved.figures[figureId].voice,spec=saved.manifest.voiceLibrary.voices[binding.voice]
   assert.equal(spec.sources[binding.source??spec.defaultSource].provider,kind)
   assert.equal(spec.sources[binding.source??spec.defaultSource].voiceName,voiceId)
@@ -79,15 +80,14 @@ for(const kind of ['minimax','qwen'])test(`${kind} only: new figure -> online vo
   api.close({scope:preview.scope})
 })
 
-// 选声音's tabs: a service set up in 语音后端 is a tab of its own by its own name, then 浏览器朗读; 浏览器朗读 alone is no service.
-test('选声音 tabs: a service tab by its own name, then 浏览器朗读',async()=>{
+// 新建声音 / 编辑声音 list the services set up in 语音后端 (浏览器朗读 is its own); a service that offers no source kind is not listed.
+test('新建声音 services: the catalog order, without 浏览器朗读 or a service with nothing to offer',()=>{
   const ctx=ui()
   assert.equal(ctx.catalogServices({services:[{id:'browser',kind:'browser',sources:['preset']}]}).length,0)
-  for(const kind of ['minimax','qwen']){
-    const rows=ctx.rows({services:[{id:'one',kind,label:kind==='qwen'?'通义千问':'MiniMax',sources:['preset'],state:'configured'}]})
-    assert.deepEqual(JSON.parse(JSON.stringify(rows.map(r=>[r.id,r.title]))),[['service:one',kind==='qwen'?'通义千问':'MiniMax'],['browser','浏览器朗读']])
-  }
+  const listed=ctx.catalogServices({services:[{id:'q',kind:'qwen',sources:['preset']},{id:'x',kind:'minimax',sources:[]},{id:'m',kind:'minimax',sources:['preset']}]})
+  assert.deepEqual(listed.map(s=>s.id),['q','m'])
 })
+
 test('preview warning is per failed audition, not the selected provider',()=>{
   const ctx=ui()
   const failed=ctx.VoicePlay({state:{phase:'error',error:'账户余额不足'},label:'少女'})
@@ -96,4 +96,27 @@ test('preview warning is per failed audition, not the selected provider',()=>{
   assert.equal(failed.props.title,'账户余额不足')
   assert.equal(nodes(untouched).find(n=>n.type==='glyph').props.name,'play')
   for(const provider of ['minimax','qwen'])assert.match(ctx.voiceIssueText('SERVICE_REQUIRED',{provider}),/^这个声音绑定的语音服务还没设置.*重新选择/)
+})
+
+// 编辑声音's 保存 (useVoiceWriter saveVoice): the figure's voice becomes what the editor showed — the same voice, moved to
+// another service, its other sources kept — and the figure speaks with it as it is (no source or language of its own left).
+test('编辑声音 保存: the same voice is rewritten as the editor showed it; the figure speaks with it as it is',async t=>{
+  const root=new URL('../.tmp/',import.meta.url);await mkdir(root,{recursive:true})
+  const library=createAssetPackService({assetRoot:await mkdtemp(fileURLToPath(new URL('service-switch-',root))),authorizeLease:async()=>true})
+  t.after(()=>library.dispose())
+  let pack=(await library.createPack({name:'测试',expectedRevision:null})).snapshot
+  pack=(await library.createFigure({packId:pack.manifest.id,expectedRevision:pack.revision,figure:{schemaVersion:1,id:FIGURE_ID,name:'新人物',enabled:true,outfits:[]}})).snapshot
+  const figureId=pack.manifest.figures[0],ctx=ui()
+  const commitVoice=async job=>{const result=await job(pack);pack=result.snapshot;return result}
+  const writer=()=>ctx.useVoiceWriter({binding:{service:library},pack,figure:pack.figures[figureId],setError:message=>assert.equal(message,''),commitVoice})
+  const voiceId='a'.repeat(32),fish={kind:'voice-id',provider:'fish-audio',voiceId,serviceId:'local',model:'drama-3'}
+  await writer().createVoice({name:'声音',language:'ja',defaultSource:'fish',sources:{fish}})
+  const id=pack.figures[figureId].voice.voice
+  pack=(await library.saveFigureVoiceBinding({packId:pack.manifest.id,figureId,expectedRevision:pack.revision,binding:{voice:id,source:'fish',language:'zh'}})).snapshot
+  const azure={kind:'preset',provider:'azure',voiceName:'ja-JP-NanamiNeural'}
+  await writer().saveVoice({name:'新名字',language:'ja',defaultSource:'azure',sources:{fish:{...fish,serviceId:'cloud'},azure},variants:{normal:{name:'原声',tuning:{azure:{rate:10}}}}})
+  const saved=pack.manifest.voiceLibrary.voices[id]
+  assert.deepEqual([saved.name,saved.defaultSource,saved.sources.azure,saved.sources.fish.serviceId],['新名字','azure',azure,'cloud'])
+  assert.deepEqual(saved.variants.normal.tuning,{azure:{rate:10}},'the parameters stay with the voice')
+  assert.deepEqual(pack.figures[figureId].voice,{voice:id},'the same voice; the source and language the figure had chosen before are gone')
 })

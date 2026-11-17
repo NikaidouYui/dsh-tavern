@@ -87,7 +87,7 @@ render({ item, gameId, turn })  // item 与 list 返回的字段相同，另有 
 
 ## `registerTextMarker({ pattern, render })`
 
-正文里匹配 `pattern`（正则）的片段交给插件显示，例如把 `image###…###` 换成图片。生成过程中也会调用，此时 `streaming` 为 `true`。
+正文里匹配 `pattern`（正则）的已有片段交给插件显示。生成过程中也会调用，此时 `streaming` 为 `true`。这是上游保留的渲染接口；舞台效果走导演命令，不借此定义新的正文协议。
 
 ```js
 render({ match, groups, gameId, turn, streaming })  // 返回 React 元素；返回 null 或出错时原样显示这段文字
@@ -95,7 +95,7 @@ render({ match, groups, gameId, turn, streaming })  // 返回 React 元素；返
 
 - 普通正文里，标记就地替换。
 - 写在人物卡自己的 HTML 界面（状态栏、美化面板）里的标记，无法拆开那段 HTML，会从界面里去掉，显示在那段界面之后。
-- 标记仍留在对话历史里，后续轮次模型能看到。是否要求模型继续写，由插件在提示词段落里说明。
+- 原始片段仍留在对话历史里，后续轮次模型能看到；渲染不修改历史内容。
 
 ## `registerMessageAction({ id, label, when, run })`
 
@@ -105,7 +105,7 @@ render({ match, groups, gameId, turn, streaming })  // 返回 React 元素；返
 context = { gameId, turn, settled, text }
 ```
 
-`text` 是这条消息的正文（模型写出的原文），可用来只在合适的消息下显示按钮，例如正文里已经有某个标记时就不显示。
+`text` 是这条消息的正文（模型写出的原文），可用来只在合适的消息下显示按钮，例如正文里已经写到某段内容时就不显示。
 
 ## `registerComposerAction({ id, label, when, run })`
 
@@ -310,6 +310,23 @@ ctx.tavernUi.registerComposerSlot({
 - 高度由内容决定，最高 40vh，超出内部滚动；Tavern 会把输入区上移，不会盖住最新一条消息。
 - 出错时只显示一行错误；卡内插件按它那张卡的局生效。
 
+## `registerComposerTool({ id, modes, render })`（第 10 版）
+
+在输入卡尾部的紧凑控制区（模型席与提交键同一行）放一个图标按钮。和 `registerComposerSlot` 的区别只有一条：**不占输入框上方的停靠区一行**，所以适合“只有一个图标”的入口（剧情罗盘、语音、开关类面板），不会把最新一条正文挤到输入区后面。
+
+```js
+ctx.tavernUi.registerComposerTool({
+  id: 'compass', modes: ['play'],
+  render: ({ sessionId, busy }) => h(IconButton, { sessionId, busy }),
+})
+```
+
+- `render` 收到 `{ sessionId, busy }`，返回 React 元素或 null（不显示）；同一插件同名 id 不能重复注册，卸载后移除。
+- 只放一个字形：这一行本来就窄，文字请写进 `title` 与 `aria-label`。
+- 状态（已启用、正在跑、出错）用图标本身表达：加个小圆点或换图标，不要再展开成一行文字。
+- 活动面板展开时宿主要把这一行收起来（`hidden`），所以承载的功能要能在别处完整操作；点击后用 `openPanel()` 打开完整界面。
+- 宿主版本低于第 10 版时这个方法是 `undefined`：插件应退回 `registerComposerSlot`，不要直接调用。
+
 ## `setInput({ gameId, text })`、`submitInput({ gameId, text })`（第 2 版）
 
 `setInput` 把文字填进这一局的输入框，不发送，玩家可以改了再发。`submitInput` 直接作为玩家输入发送并生成正文，返回 Promise（提交后完成，不等正文写完；要等结果用 `watchTurnState`）。正在生成时会排在当前这轮之后。这一局没有在当前页面打开时报错。
@@ -413,7 +430,7 @@ ctx.tavernUi.registerStatusSection({ id: 'scene', title: '当前场景', render:
 ctx.tavernUi.registerTurnView({
   id: 'bubble', label: '气泡',
   render({ gameId, turn, settled, streaming, greeting, text, lines, children }) {
-    if (!settled || !lines.length) return null        // 还在生成、或没有台词标注时用 Tavern 自己的
+    if (!settled || !lines.length) return null        // 还在生成、或没有对话气泡时用 Tavern 自己的
     return h(BubbleTurn, { lines, text, fallback: children })
   },
 })
@@ -424,7 +441,7 @@ ctx.tavernUi.registerTurnView({
 | `turn`、`settled`、`streaming` | 第几轮；是否已写完；是否正在生成（生成中也会调用） |
 | `greeting` | 是不是开场白 |
 | `text` | 这一轮模型写的原文 |
-| `lines` | 这一轮的台词标注（同宿主侧 `getCast` 的 `lines`），还没有时为空数组 |
+| `lines` | 这一轮对话气泡的台词（同宿主侧 `getCast` 的 `lines`），写完前或没有气泡时为空数组 |
 | `children` | Tavern 自己渲染好的这一轮正文（含人物卡的 HTML 界面、正文标记、插件媒体的位置） |
 
 - 每一轮只由收尾的那一步显示一次，不会重复。
@@ -433,16 +450,37 @@ ctx.tavernUi.registerTurnView({
 
 ## `getStage(gameId, { count? })`、`watchStage(gameId, listener)`（第 2 版）
 
-舞台要显示的东西：`{ enabled, player, card, background, characters, turns }`。`background` 是人物卡带的主背景图地址，没有时为空字符串。`turns` 是最近 `count` 轮（默认 5，最多 10）的 `{ turn, text, lines }`，`text` 是去掉 HTML 块的正文，`lines` 同宿主侧 `getCast`；`characters` 同宿主侧 `getCastAssets`；`enabled` 是这张卡的局是否显示舞台（玩家在舞台设置里打开了舞台，且人物卡绑定了素材包）。`watchStage` 先回调一次，之后在新的一轮、新的标注、素材变化后再回调，只在这一局在当前页面打开时有效。
+舞台要显示的东西：`{ enabled, player, card, background, characters, turns }`。`background` 是人物卡带的主背景图地址，没有时为空字符串。`turns` 是最近 `count` 轮（默认 5，最多 10）的 `{ turn, text, lines }`，`text` 是去掉 HTML 块的正文，`lines` 同宿主侧 `getCast`（没有气泡时为空数组）；`characters` 同宿主侧 `getCastAssets`；`enabled` 是这张卡是否打开了舞台。`watchStage` 先回调一次，之后在新的一轮、素材变化后再回调，只在这一局在当前页面打开时有效。
 
 ## `registerStageView`（已停用）
 
-插件不能再替换舞台画面。舞台由 Tavern 按人物卡绑定的素材包绘制：给人物卡绑定素材包并打开对话气泡即可。调用 `registerStageView` 会直接报错。
+插件不能再替换舞台画面。舞台由 Tavern 按人物卡绑定的素材包绘制：给人物卡绑定素材包并打开这张卡的舞台即可。调用 `registerStageView` 不会注册任何视图，只在错误提示里报告这次调用。
 
 ## `speak({ gameId, speaker?, text, emotion?, narration? })`、`stopSpeech()`（第 2 版）
 
 在当前页面朗读一句，用玩家选的配音渠道和这个人物的声音（浏览器朗读也可以）。返回的 Promise 在读完时为 `true`，被打断、配音关闭或失败时为 `false`。同一时间只读一句，新的一句会打断正在读的；`stopSpeech()` 立即停止。适合插件的舞台画面、自己的面板逐句朗读。
 
+## `components`（第 9 版）
+
+酒馆自己的控件：`{ Slider, Segmented, Switch, SearchBox, Icon, Spinner, EmptyState }`。插件的界面用它们，外观、键盘操作和酒馆一致；参数与酒馆内部相同（如 `h(Slider, { label, min, max, step, value, onChange, output })`、`h(Segmented, { label, value, options: [[值, 文字], …], onChange })`、`h(Icon, { name: 'speaker', size: 16 })`）。
+
+## `registerHeaderTool({ id, render })`（第 9 版）
+
+在一局游戏的顶栏（背景音乐旁边）放一个小工具。`render({ gameId, menu })` 返回 React；手机上顶栏收进 ⋯ 菜单，这时 `menu` 为 `true`，应画成一行菜单项（`role: 'menuitem'`）。同一插件的 `id` 不能重复；插件停用时自动撤掉。
+
+## 朗读正文：`readingUnits`、`prepareReading`、`playReading`、`pauseReading`、`resumeReading`、`stopReading`、`tuneReading`、`readingVoices`（第 9 版）
+
+按舞台的读法朗读整局正文，用酒馆的语音播放器（和气泡 ▶ 同一个声音、同一份缓存）。
+
+- `readingUnits(gameId)` → 每条写完的回复拆成的朗读单位，按顺序：`{ key, row, floor, n, para, kind: 'line' | 'narration', text, speaker }`。`row` 是正文里那一楼的 `data-row-key`，`text` 是页面上显示的字，`para` 相同的单位属于同一段。
+- `playReading(gameId, key, options)` 读一个单位，读完时 Promise 得到 `{ ended: true }`，被停止或被别的声音取代时 `{ stopped: true }`，没有可读的 `{ skipped: true }`，读不出来 `{ error: 代码 }`。`options`：`voice`（`null` = 旁白声音，`{ figure: { packId, figureId } }` 素材库人物，`{ browser: 声音 id }` 系统声音）、`lines`（`'figure'` 台词按角色自己的声音，`'reader'` 全用朗读声音）、`volume`（0–1）、`rate`、`onStart()`（声音开始时调用）。
+- `prepareReading(gameId, key, options)` 提前合成，不播放；`pauseReading()` / `resumeReading()` 暂停、继续正在读的那句（没有时返回 `false`）；`stopReading()` 停止；`tuneReading({ volume, rate })` 立即改正在读的那句。
+- `readingVoices()` → 可选的朗读声音 `[{ key, group, name, value }]`（素材库里有声音的人物和系统声音），`value` 直接传给 `options.voice`。
+
+## `holdVoice()`（第 9 版）
+
+占住酒馆的声音通道：占着时舞台和正文气泡都不配音（没有自动配音，气泡上也没有 ▶），正在说的那句停下。返回释放函数；插件停用时自动释放。适合「有声书」这类自己读正文的插件。
+
 ## `playMusic(url | { url, title?, volume? })`、`stopMusic()`（第 2 版）
 
-背景音乐由 Tavern 播放：同一时间一首、循环；传入同一个地址时接着放，换地址时淡入新曲，传空字符串或调 `stopMusic()` 时淡出。玩家在全屏舞台控制栏的「♪ 音乐」开关决定听不听得到（记在这个浏览器里），所有卡的音乐都受这一个开关管。离开这一局（切换、删除对话）或这一局不再显示舞台时，Tavern 会停掉音乐；插件换局后要重新调 `playMusic`。`volume` 为 0–1，默认 0.45。
+背景音乐由 Tavern 播放：同一时间一首、循环；传入同一个地址时接着放，换地址时淡入新曲，传空字符串或调 `stopMusic()` 时淡出。玩家在舞台上方的「♪ 音乐」开关决定听不听得到（记在这个浏览器里），所有卡的音乐都受这一个开关管。离开这一局（切换、删除对话）或这一局不再显示舞台时，Tavern 会停掉音乐；插件换局后要重新调 `playMusic`。`volume` 为 0–1，默认 0.45。

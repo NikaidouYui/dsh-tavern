@@ -70,6 +70,7 @@ export function releaseOpeningTurn(session, agent) {
 // step), per session: not the player's.
 const surfaceEditTurns = new WeakMap()
 const suppressedEditLifecycles = new WeakSet()
+const reservingTurns = new WeakSet()
 
 /** 批量抑制非必要的编辑生命周期副作用（如故事分叉批量播种期间）。 */
 export function withSuppressedEditLifecycle(session, work) {
@@ -124,6 +125,30 @@ export function isSurfaceEditTurn(session, turn) {
 /** 清除当前会话上登记的临时表面编辑轮号标记（用于事务性回滚恢复）。 */
 export function clearSurfaceEditTurns(session) {
   if (session && typeof session === 'object') surfaceEditTurns.delete(session)
+}
+
+export function isReservingStoryTurns(session) {
+  return reservingTurns.has(session)
+}
+
+// A story fork replays multiple saved replies in one edit turn. New player
+// turns use native numbers as story IDs, so reserve the inherited range with
+// empty boundaries. DSH's persisted log requires consecutive native turns.
+export function reserveStoryTurns(session, lastStoryTurn, agent) {
+  const lastNativeTurn = sessionEvents(session).findLast(event => event.type === 'turn/end')?.data?.turn || 0
+  if (lastNativeTurn >= lastStoryTurn) return
+  reservingTurns.add(session)
+  try {
+    for (let turn = lastNativeTurn + 1; turn <= lastStoryTurn; turn++) {
+      appendSessionEvent(session, 'turn/start', { turn })
+      appendSessionEvent(session, 'turn/end', { turn, reason: { kind: 'completed' } })
+    }
+  } finally {
+    reservingTurns.delete(session)
+  }
+  if (agent?.phase?.kind === 'idle') {
+    agent.phase.lastTurn = Math.max(Number(agent.phase.lastTurn) || 0, lastStoryTurn)
+  }
 }
 
 export function withSurfaceEditTurn(session, agent, write) {

@@ -12,11 +12,11 @@ import { randomUUID } from 'node:crypto'
 // `deps` carries the services ../index.js builds; dispatchMethod routes by method name.
 export function createPlayHandlers(deps) {
   const { agentCompaction, agentRegistry, autoChoices, backgroundAgentRunner, backgroundCatalog, storyEvents, workflow, pluginApi, bodyEditor, branchOrigin, polishPrereview, polishRecords, polishReviewer, cardUpdates,
-    candidateGenerator, candidateTasks, chatForSession, compactionAbort, conversationGuides, ctx,
-    ledgerEditor, manualCharacterDesign, manualLedger, messageDeletion, notifyPluginTimeline, phoneChat, plotCompassService,
+    candidateGenerator, candidateTasks, chatForSession, compactionAbort, conversationBackgroundSettings, conversationGuides, ctx,
+    ledgerEditor, manualCharacterDesign, manualLedger, messageDeletion, notifyPluginTimeline,
     pluginSettlementProgress, readBackgroundSuppression, readTavernSettings,
     reconcileStory, reconcileWhenIdle, regenBody, requestPerformance, retrySettlement,
-    retryStyleReference, rollbackTurn, rollbackToTurn, runtimeGeneration, sessionActivity, sessionOperation,
+    retryStyleReference, rollbackTurn, rollbackToTurn, runtimeGeneration, sessionActivity, sessionOperation, sessionSignals,
     sessionStateForSession, sessionStore, sessionView, sessionViews, setPlayerName, stopBackground, str,
     templateHistoryFrom, turnOrchestrator, undoRollbackTurn, updateChat, view, withCompactionSession } = deps
   // 发送键只认宿主的运行状态。重新生成要先把存档读出来、挑出要替换的正文、拼好这一轮的
@@ -35,6 +35,24 @@ export function createPlayHandlers(deps) {
     if (before !== 0 && after !== 0) return
     try { ctx.emit('api-session/status', sessionId, after > 0) }
     catch (error) { console.warn('dsh-tavern: 重新生成的运行状态没有送到页面', str(error?.message || error)) }
+  }
+  // A phone switching to a game sends the same sync three or four times in the same
+  // second (page mount, tab focus, pending-task wake-up), and each one used to walk the
+  // same save again — hundreds of milliseconds, once nearly three seconds. Identical
+  // calls in flight share one run; the newer duplicates only wait for its result. A
+  // different kind/requestId is a different question and still runs on its own.
+  const syncRuns = new Map()
+  function runSessionSync(sessionId, args) {
+    const key = JSON.stringify([sessionId, str(args && args.kind), str(args && args.requestId)])
+    const running = syncRuns.get(key)
+    if (running !== undefined) return running
+    const work = (async () => {
+      const sync = await requestPerformance.stage('candidateSync', () => candidateTasks.sync(sessionId, { requestId: args && args.requestId, kind: args && args.kind }))
+      requestPerformance.state({ foregroundRunning: agentRegistry.get(sessionId)?.phase?.kind === 'running', backgroundBusy: sync.activity?.busy, backgroundRole: sync.activity?.role })
+      return { sync }
+    })().finally(() => { if (syncRuns.get(key) === work) syncRuns.delete(key) })
+    syncRuns.set(key, work)
+    return work
   }
   return {
     async appendPlayerInput(args) {
@@ -86,9 +104,6 @@ export function createPlayHandlers(deps) {
     async consolidateLedger(args) {
       return await manualLedger.start(args || {})
     },
-    async sendPhoneMessage(args) {
-      return { phoneChat: await phoneChat.send(args || {}) }
-    },
     async runCompaction(args) {
       const id = str(args && args.sessionId), chat = await chatForSession(id)
       if (chat && ['story', 'script'].includes(chat.mode)) return { result: await deps.autoCompaction.run(id, { manual: true, signal: compactionAbort.signal }) }
@@ -107,9 +122,7 @@ export function createPlayHandlers(deps) {
       return { state: (await sessionStateForSession(args && args.sessionId))?.contextCompaction || null }
     },
     async syncSession(args) {
-      const sync = await requestPerformance.stage('candidateSync', () => candidateTasks.sync(args && args.sessionId, { requestId: args && args.requestId, kind: args && args.kind }))
-      requestPerformance.state({ foregroundRunning: agentRegistry.get(str(args?.sessionId))?.phase?.kind === 'running', backgroundBusy: sync.activity?.busy, backgroundRole: sync.activity?.role })
-      return { sync }
+      return await runSessionSync(str(args?.sessionId), args)
     },
     async submitTask(args) {
       // A manual request supersedes the automatic one still waiting for this game.
@@ -150,68 +163,6 @@ export function createPlayHandlers(deps) {
     },
     async deleteGuide(args) {
       return { guides: await conversationGuides.remove(args?.sessionId, args) }
-    },
-    async generatePlotCompass(args) {
-      return await plotCompassService.generate({
-        sessionId: args?.sessionId,
-        scope: args?.scope,
-        guidance: args?.guidance,
-        wait: args?.wait === true
-      })
-    },
-    async cancelPlotCompass(args) {
-      return await plotCompassService.cancel({ sessionId: args?.sessionId })
-    },
-    async pinPlotCompassRoute(args) {
-      const plotCompass = await plotCompassService.pin({
-        sessionId: args?.sessionId,
-        horizon: args?.horizon,
-        routeId: args?.routeId,
-        exact: args?.exact === true
-      })
-      return { plotCompass }
-    },
-    async togglePlotCompassStep(args) {
-      const plotCompass = await plotCompassService.toggleStep({
-        sessionId: args?.sessionId,
-        horizon: args?.horizon,
-        routeId: args?.routeId,
-        stepIndex: args?.stepIndex
-      })
-      return { plotCompass }
-    },
-    async setPlotCompassArchetypes(args) {
-      const plotCompass = await plotCompassService.setArchetypes({
-        sessionId: args?.sessionId,
-        archetypes: args?.archetypes
-      })
-      return { plotCompass }
-    },
-    async setPlotCompassPreferences(args) {
-      const plotCompass = await plotCompassService.setPreferences({
-        sessionId: args?.sessionId,
-        pace: args?.pace,
-        blindBox: args?.blindBox,
-        customDirective: args?.customDirective
-      })
-      return { plotCompass }
-    },
-    async chatPlotCompass(args) {
-      return await plotCompassService.chat({
-        sessionId: args?.sessionId,
-        message: args?.message,
-        wait: args?.wait === true
-      })
-    },
-    async clearPlotCompassChat(args) {
-      const plotCompass = await plotCompassService.clearChat({ sessionId: args?.sessionId })
-      return { plotCompass }
-    },
-    async setPlotCompassEnabled(args) {
-      return await plotCompassService.setEnabled({
-        sessionId: args?.sessionId,
-        enabled: args?.enabled
-      })
     },
     async deleteMessages(args) {
       autoChoices.cancel(args && args.sessionId)
@@ -324,8 +275,10 @@ export function createPlayHandlers(deps) {
         // fresh：长按发送键 1 秒的直接重生成，跳过「正文被改过就带着它改写」的判断，
         // 这一轮从头重新采样；正文编辑面板与指导面板的重新生成不传这个标记。
         const view = await regenBody(args && args.chatId, args && args.guidance, sessionId, { fresh: args?.fresh === true })
-        notifyPluginTimeline(sessionId, 'regenerate')
-        void polishPrereview.start(sessionId).catch(() => {})
+        if (!view?.aborted) {
+          notifyPluginTimeline(sessionId, 'regenerate')
+          void polishPrereview.start(sessionId).catch(() => {})
+        }
         return { view }
       } finally {
         announceRegenerating(sessionId, false)

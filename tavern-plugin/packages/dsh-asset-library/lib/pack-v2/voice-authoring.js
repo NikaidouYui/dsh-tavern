@@ -179,7 +179,9 @@ export function createVoiceAuthoring({assetRoot,storage,run,load,edit,cas,limits
         for (const id of manifest.figures) {
           const name = 'figures/' + id + '.json', figure = readDocument(files.get(name))
           if (figure.voice?.voice !== input.voiceId) continue
-          delete figure.voice; retainVoiceEmotionPointers(figure,manifest); files.set(name,jsonBytes(figure)); affected.push({id,name:figure.name})
+          // a figure with 配音 off stays silent on the 通用声音 ({source:null}).
+          if (figure.voice.source === null) figure.voice = {source:null}; else delete figure.voice
+          retainVoiceEmotionPointers(figure,manifest); files.set(name,jsonBytes(figure)); affected.push({id,name:figure.name})
         }
         dropVoices(manifest,files,[input.voiceId])
         return {affectedFigures:affected}

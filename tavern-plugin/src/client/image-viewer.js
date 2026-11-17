@@ -79,6 +79,8 @@ function ImageViewer(props) {
         try { if (!node.matches(":popover-open")) node.showPopover(); } catch (_) {}
         return () => { try { if (node.matches(":popover-open")) node.hidePopover(); } catch (_) {} };
     }, []);
+    // The viewer covers the whole window: in full screen on the Windows Desktop, closed when full screen is left.
+    useWindowFullscreen(true, { onLost: close, topLayer: () => root.current });
     React.useEffect(function () {
         const previous = typeof document === "undefined" ? null : document.activeElement;
         if (root.current && root.current.focus) root.current.focus({ preventScroll: true });

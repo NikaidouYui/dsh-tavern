@@ -116,7 +116,7 @@ test('本局默认模板保存、恢复与新局继承覆盖全部本局设置�
       cardContextSnapshot: '[偏好正文]\n\n[人物卡正文]',
       cardContextRevision: 1,
       backgroundModelSelection: { provider: 'reapi', model: 'deepseek/deepseek-v4.1', reasoningEffort: 'high' },
-      backgroundTasks: { variables: true, posture: false, plotCompass: true, styleReference: false, foregroundCandidates: true, preset: true },
+      backgroundTasks: { variables: true, posture: false, styleReference: false, foregroundCandidates: true, preset: true },
       webSearchEnabled: true,
       storyGenerationMode: 'plugin-direct',
       storyGenerationProvider: 'gen:one',
@@ -228,9 +228,6 @@ test('本局默认模板保存、恢复与新局继承覆盖全部本局设置�
     invalidateTavernSkills: () => { skillsInvalidated += 1 }
   })
 
-  const initialDefaults = await readTavernSettings()
-  assert.equal(initialDefaults.defaultPlaySettings.backgroundTasks.plotCompass, false)
-
   const saveRes = await handlers.saveConversationSettingsAsDefaultTemplate({ sessionId: 's1' })
   assert.equal(saveRes.saved, true)
   assert.deepEqual(saveRes.warnings, [])
@@ -239,7 +236,6 @@ test('本局默认模板保存、恢复与新局继承覆盖全部本局设置�
   const savedSettings = await readTavernSettings()
   assert.equal(savedSettings.defaultPlaySettings.playerName, '旅人')
   assert.equal(savedSettings.defaultPlaySettings.backgroundTasks.posture, false)
-  assert.equal(savedSettings.defaultPlaySettings.backgroundTasks.plotCompass, true)
   assert.equal(savedSettings.defaultPlaySettings.backgroundTasks.styleReference, false)
   assert.equal(savedSettings.defaultPlaySettings.backgroundTasks.foregroundCandidates, true)
   assert.equal(savedSettings.defaultPlaySettings.backgroundTasks.preset, true)
@@ -260,7 +256,6 @@ test('本局默认模板保存、恢复与新局继承覆盖全部本局设置�
   assert.equal(restored.userProfileId, 'p1')
   assert.deepEqual(restored.backgroundModelSelection, { provider: 'reapi', model: 'deepseek/deepseek-v4.1', reasoningEffort: 'high' })
   assert.equal(restored.backgroundTasks.posture, false)
-  assert.equal(restored.backgroundTasks.plotCompass, true)
   assert.equal(restored.backgroundTasks.styleReference, false)
   assert.equal(restored.backgroundTasks.foregroundCandidates, true)
   assert.equal(restored.backgroundTasks.preset, true)
@@ -303,7 +298,6 @@ test('本局默认模板保存、恢复与新局继承覆盖全部本局设置�
   assert.equal(publishedChat.runtimePresetPath, 'presets/reborn.json')
   assert.deepEqual(publishedChat.backgroundModelSelection, { provider: 'reapi', model: 'deepseek/deepseek-v4.1', reasoningEffort: 'high' })
   assert.equal(publishedChat.backgroundTasks.posture, false)
-  assert.equal(publishedChat.backgroundTasks.plotCompass, true)
   assert.equal(publishedChat.backgroundTasks.styleReference, false)
   assert.equal(publishedChat.backgroundTasks.foregroundCandidates, true)
   assert.equal(publishedChat.backgroundTasks.preset, true)
@@ -325,36 +319,19 @@ test('后台任务附加预设默认关闭且校验布尔类型', async () => {
   assert.equal(patched.defaultPlaySettings.backgroundTasks.preset, true)
 })
 
-test('剧情罗盘模型默认跟随后台，支持独立设置、清除推理强度及非法值拦截', () => {
-  assert.equal(presentTavernSettings({}, {}).plotCompassModel, null)
 
-  const custom = applyTavernSettingsPatch({}, {
-    plotCompassModel: { provider: 'reapi', model: 'deepseek/deepseek-reasoner', reasoningEffort: 'high' }
-  })
-  assert.deepEqual(presentTavernSettings(custom, {}).plotCompassModel, {
-    provider: 'reapi',
-    model: 'deepseek/deepseek-reasoner',
-    reasoningEffort: 'high'
-  })
 
-  // 切回“模型默认”推理强度时会传入 reasoningEffort: null，应被归一化去除该字段
-  const defaultEffort = applyTavernSettingsPatch(custom, {
-    plotCompassModel: { provider: 'reapi', model: 'deepseek/deepseek-reasoner', reasoningEffort: null }
-  })
-  assert.deepEqual(presentTavernSettings(defaultEffort, {}).plotCompassModel, {
-    provider: 'reapi',
-    model: 'deepseek/deepseek-reasoner'
-  })
-
-  // 设回 null 表示恢复“跟随后台模型”
-  const cleared = applyTavernSettingsPatch(defaultEffort, { plotCompassModel: null })
-  assert.equal(presentTavernSettings(cleared, {}).plotCompassModel, null)
-
-  for (const invalid of [{ provider: 'reapi' }, { model: 'only-model' }, 'bad', 123]) {
-    assert.throws(() => applyTavernSettingsPatch({}, { plotCompassModel: invalid }), /默认模型配置无效/)
-  }
-
-  // 验证服务端配置校验与后台任务策略已接通 plotCompassModel 与 plot-compass ownModel
-  assert.match(serverSource, /for \(const name of \['defaultForegroundModel', 'defaultBackgroundModel', 'defaultWorkbenchModel', 'plotCompassModel'\]\)/)
-  assert.match(serverSource, /backgroundTaskPolicies = new Map\(\[\['polish', \{ ownModel: true \}\], \['plot-compass', \{ ownModel: true \}\]\]\)/)
+test('候选多角色/全局 Tab 默认关闭，保存布尔值并原样读回', async () => {
+  const { applyTavernSettingsPatch, presentTavernSettings } = await import('../tavern-plugin/lib/domain/tavern-settings.js')
+  const { createSettingsHandlers } = await import('../tavern-plugin/lib/rpc/settings.js')
+  assert.equal(presentTavernSettings({}, {}).candidateTabs, false)
+  assert.throws(() => applyTavernSettingsPatch({}, { candidateTabs: 'yes' }), /无效的候选 Tab 设置/)
+  const patched = applyTavernSettingsPatch({}, { candidateTabs: true })
+  assert.equal(patched.candidateTabs, true)
+  assert.equal(presentTavernSettings(patched, {}).candidateTabs, true)
+  // 候选偏好 RPC 把开关一起带给候选卡（默认关闭时是 false，不是 undefined）。
+  const handlers = createSettingsHandlers({ readTavernSettings: async () => presentTavernSettings(patched, {}) })
+  assert.equal((await handlers.getCandidatePreferences({})).candidateTabs, true)
+  const off = createSettingsHandlers({ readTavernSettings: async () => presentTavernSettings({}, {}) })
+  assert.equal((await off.getCandidatePreferences({})).candidateTabs, false)
 })

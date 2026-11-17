@@ -103,6 +103,8 @@ function createConversationSettingsModule({
             error ? h("p", { role: "alert" }, error) : null);
     }
 
+    // Options plugins add to this game's settings (tavern.gameSettings), drawn like Tavern's own.
+    // Plugins themselves are switched on and off globally, on the 酒馆插件 page.
     function TavernConversationPluginSettings(props) {
         const h = React.createElement;
         const [data, setData] = React.useState(null);
@@ -198,7 +200,8 @@ function createConversationSettingsModule({
                 h("button", { type: "button", className: "dsh-tavern-btn", disabled: busy, onClick: () => void load() }, "刷新")),
             catalog.map(tool => h("label", { key: tool.name, className: "dsh-tavern-background-task" },
                 h("span", null, (tool.source === "plugin" ? "插件/扩展 · " : "") + tool.label, h("span", { className: "dsh-tavern-settings-desc" }, tool.description)),
-                h("input", { type: "checkbox", role: "switch", "aria-label": tool.label, checked: !disabled.includes(tool.name), disabled: !loaded || busy, onChange: event => toggle(tool.name, event.target.checked) }))),
+                // the one switch, bare inside the row's own label.
+                h(Switch, { bare: true, label: tool.label, checked: !disabled.includes(tool.name), disabled: !loaded || busy, onChange: checked => toggle(tool.name, checked) }))),
             error ? h("p", { role: "alert" }, "保存失败：" + error) : h("span", { role: "status", className: "dsh-local-feedback" }, busy ? "保存中…" : (loaded ? notice : "正在读取…")));
     }
 
@@ -293,7 +296,7 @@ function createConversationSettingsModule({
         const h = React.createElement;
         const [catalog, setCatalog] = React.useState([]);
         const [selection, setSelection] = React.useState(null);
-        const [tasks, setTasks] = React.useState({ variables: true, posture: true, plotCompass: false });
+        const [tasks, setTasks] = React.useState({ variables: true, posture: true });
         const [features, setFeatures] = React.useState({ webSearchEnabled: false, mvuCard: false });
         const [loaded, setLoaded] = React.useState(false);
         const [busy, setBusy] = React.useState(false);
@@ -328,7 +331,6 @@ function createConversationSettingsModule({
                 setSelection(result.backgroundModel); setTasks(result.backgroundTasks); setFeatures({ ...features, webSearchEnabled: result.webSearchEnabled });
                 setNotice("已保存");
                 invalidateView(props.sessionId);
-                if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("dsh-tavern-background-config-changed", { detail: { sessionId: props.sessionId } }));
             } catch (err) { setError(String(err.message || err)); }
             finally { setBusy(false); }
         }
@@ -352,12 +354,11 @@ function createConversationSettingsModule({
                         options: [{ value: "", label: key ? "模型默认" : "跟随前台" }, ...efforts.map(item => ({ value: item.id, label: item.name || item.id }))] })),
             h("section", { className: "dsh-local-section" }, h("h3", null, "功能"),
                 toggle("posture", "人物姿势", "每轮总结人物的位置、动作和姿势，供前台保持一致。", tasks.posture, checked => ({ backgroundTasks: { posture: checked } })),
-                toggle("plotCompass", "剧情罗盘", "推演短期、中期、长期多路线剧情发展灵感；关闭后不注入提示词且不自动演进，已保存的路线数据会保留。", tasks.plotCompass === true, checked => ({ backgroundTasks: { plotCompass: checked } })),
                 toggle("styleReference", "文风联想", "仅自由模式。前台写正文前，结合本轮场景联想一段笔调参考；与写作共享上下文，不另开后台任务。", tasks.styleReference === true, checked => ({ backgroundTasks: { styleReference: checked } })),
                 toggle("foregroundCandidates", "前台生成候选项", "仅自由模式。让主模型在正文结尾后直接生成本轮候选项，写完即显示，不等待后台任务。", tasks.foregroundCandidates === true, checked => ({ backgroundTasks: { foregroundCandidates: checked } })),
-                toggle("preset", "后台任务附加预设", "默认关闭。开启后，全部后台 Agent 任务（结算、候选、精修、罗盘、导演等）在生成时也会附加当前对局的三段预设提示词，不执行预设正则。", tasks.preset === true, checked => ({ backgroundTasks: { preset: checked } })),
+                toggle("preset", "后台任务附加预设", "默认关闭。开启后，全部后台 Agent 任务（结算、候选、精修、导演等）在生成时也会附加当前对局的三段预设提示词，不执行预设正则。", tasks.preset === true, checked => ({ backgroundTasks: { preset: checked } })),
                 toggle("webSearchEnabled", "联网搜索", "前台和后台可按需搜索。", features.webSearchEnabled, checked => ({ webSearchEnabled: checked }))),
-            error || key && reasoning.key === key && reasoning.error ? h("p", { role: "alert", className: "dsh-tavern-prompt-error" }, error || reasoning.error) : null,
+            error || (key && reasoning.key === key && reasoning.error) ? h("p", { role: "alert", className: "dsh-tavern-prompt-error" }, error || reasoning.error) : null,
             notice ? h("p", { role: "status" }, notice) : null,
             !loaded && error ? h("button", { className: "dsh-tavern-btn", onClick: load }, "重试") : null,
             h("div", { role: "status", className: "dsh-local-feedback" }, busy ? "保存中…" : ""));

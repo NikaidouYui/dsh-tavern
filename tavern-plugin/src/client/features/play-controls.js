@@ -798,11 +798,11 @@
         }
         function TavernRollbackToTurnButton({ sessionId, turn, round, floorNo, messageUid, running }) {
             const [busy, setBusy] = React.useState(false);
-            const confirm = useTavernConfirm(JSON.stringify([sessionId, turn, messageUid, running]));
+            const confirmRollback = useTavernConfirm(JSON.stringify([sessionId, turn, messageUid, running]));
             const target = floorNo ? "第 " + floorNo + " 楼" : "第 " + round + " 轮";
             async function rollbackTo() {
                 if (busy || running) return;
-                if (!await confirm("回退到" + target + "？\n\n" + target + "之后的所有输入和正文都会删除，剧情状态回到这轮结束时。之后可在菜单里「撤销回退」一次全部恢复。", { confirmText: "回退", cancelText: "取消" })) return;
+                if (!await confirmRollback("回退到" + target + "？\n\n" + target + "之后的所有输入和正文都会删除，剧情状态回到这轮结束时。之后可在菜单里「撤销回退」一次全部恢复。", { confirmText: "回退", cancelText: "取消" })) return;
                 setBusy(true);
                 try {
                     const result = await rpc("rollbackToTurn", messageUid ? { turn, messageUid } : { turn }, sessionId);
@@ -949,7 +949,6 @@
 		}
 
         // @include modules/background-wait.js
-        // @include modules/plot-compass.js
 
 		function TavernStopBackgroundAction(props) {
 			const [busy, setBusy] = React.useState(false);
@@ -1155,7 +1154,6 @@
 				"data-compacting": live.view && live.view.contextCompaction && live.view.contextCompaction.operation && live.view.contextCompaction.operation.status === "running" || undefined },
 				h("div", { className: "dsh-tavern-dock-actions-primary" },
 					isPlayMode(sessionMode) ? React.createElement(CandidateAction, Object.assign({}, props, { messageId: latestMessageId })) : null,
-					isPlayMode(sessionMode) && live.view ? React.createElement(PlotCompassDockButton, { sessionId: ownerSessionId, view: live.view, onOpen: props.openPlotCompass }) : null,
 					isPlayMode(sessionMode) && live.view && !live.view.canClearIncompleteReply ? React.createElement(TavernPluginComposerActions, { sessionId: props.sessionId, turn: imageTurn, running: running }) : null),
 				isPlayMode(sessionMode) ? React.createElement(TavernMoreActions, props) : React.createElement(TavernCompactionAction, props),
 				React.createElement(MobileComposerStatsToggle),
@@ -1290,11 +1288,18 @@
 			return React.createElement("span", { ref: marker, hidden: true, "data-tavern-error-projection": props.sessionId });
 		}
 		// 楼层刻度列挂载在常驻会话层：不受 input.dock 卸载或 running/revision 变化影响，
-		// 即使初始时刻滚动容器尚未挂载，也能在容器出现与重挂时自动接管并保持显示。
+		// 并按 sessionId 绑定到所属会话容器，与故事流列表共享同一租约，避免跨会话错绑或重复挂载。
 		function StoryFloorRailHost(props) {
 			React.useEffect(function () {
+				const sessionId = String(props.sessionId || "");
+				if (!sessionId) return undefined;
+				if (typeof acquireStoryFloorRail === "function") {
+					const lease = acquireStoryFloorRail(sessionId);
+					return function () { lease.release(); };
+				}
+				if (typeof createStoryFloorRail !== "function") return undefined;
 				const root = document.querySelector("[data-conversation-scroll]") || null;
-				const rail = createStoryFloorRail(root);
+				const rail = createStoryFloorRail(root, { sessionId: sessionId });
 				rail.apply();
 				return function () { rail.dispose(); };
 			}, [props.sessionId]);
@@ -1366,6 +1371,15 @@
 			const ctx = input.ctx;
 			const slots = input.slots;
 			installTavernAssetLaunchers(ctx, slots);
+			ctx.effect(function () {
+				return tavernUiExtensions.attachCandidateRunner(async function (sessionId, guidance) {
+					const snap = liveTavernView.snapshot(sessionId);
+					const msgId = String((snap && snap.view && snap.view.latestAssistantMessageId) || "");
+					await submitCandidateTask(sessionId, msgId, String(guidance || ""));
+					liveTavernView.invalidate(sessionId);
+					tavernCoordination.invalidate(sessionId);
+				});
+			}, "dsh-tavern: plugin candidate runner");
 			const uiConversation = ctx.get("uiConversation") || ctx.get("conversation");
 			const executeSlash = createTavernFrameSlashExecutor(ctx);
             ctx.effect(() => registerTab(ctx.betterSidebar, {
@@ -1452,8 +1466,6 @@
 					return React.createElement(TavernStatusTab, { sessions: ctx.sessions, uiConversation: uiConversation, sessionId: props.scope.sessionId, executeSlash: executeSlash, openStyleTab: function (type, meta) { openTavernSidebarTab(ctx, { type: type, meta: meta }, { sessionId: props.scope.sessionId }); } });
 				}
 			}), "dsh-tavern: Better Sidebar status tab");
-			ctx.effect(() => registerTab(ctx.betterSidebar, { id: "dsh-tavern:plot-compass", title: "剧情罗盘", order: 7, single: true,
-				component: props => React.createElement(TavernPlotCompassTab, { sessions: ctx.sessions, sessionId: props.scope && props.scope.sessionId }) }), "dsh-tavern: plot compass tab");
 			ctx.effect(() => ctx.betterSidebar.registerTab({ id: "dsh-tavern:background-tasks", title: "后台任务", order: 7, single: true,
 				component: props => React.createElement(TavernBackgroundTasksTab, { sessionId: props.scope.sessionId }) }), "dsh-tavern: background tasks tab");
 			ctx.effect(() => slots.inject("conversation.chat.assistant-actions", () => slots.register(
@@ -1466,7 +1478,6 @@
                     !ctx.sessions.subagentAddress(props.sessionId) && React.createElement(tavernReplyObserverFeature.GamePage, { sessionId: props.sessionId }),
                     React.createElement(CandidateDockActions, Object.assign({}, props, {
 					sessions: ctx.sessions,
-					openPlotCompass: function (targetSessionId) { openTavernSidebarTab(ctx, { type: "dsh-tavern:plot-compass" }, { sessionId: targetSessionId || props.sessionId }); },
 					executeCompact: function (sessionId) { return ctx.remote.commands.execute(sessionId, "/compact", []); }
 				}))); }
 			)), "dsh-tavern: candidate dock actions");
@@ -1476,8 +1487,7 @@
 					React.createElement(SupersededTurnErrors, Object.assign({}, props, { key: props.sessionId })),
 					React.createElement(TurnHistoryProjection, Object.assign({}, props, { key: "history:" + props.sessionId })),
 					React.createElement(CandidateQuestion, Object.assign({}, props, {
-						sessions: ctx.sessions,
-						openPlotCompass: function () { openTavernSidebarTab(ctx, { type: "dsh-tavern:plot-compass" }, { sessionId: props.sessionId }); }
+						sessions: ctx.sessions
 					}))
 				); }
 			)), "dsh-tavern: candidate question panel");
@@ -1492,7 +1502,10 @@
 			)), "dsh-tavern: long press send key");
 			ctx.effect(() => slots.inject("conversation.session.header.utilities", () => slots.register(
 				{ name: "conversation.session.header.utilities", id: "dsh-tavern-story-floor-rail", order: -104, label: "楼层跳转刻度列" },
-				function (props) { return React.createElement(StoryFloorRailHost, { sessionId: props.sessionId }); }
+				function (props) {
+					if (ctx.sessions && typeof ctx.sessions.subagentAddress === "function" && ctx.sessions.subagentAddress(props.sessionId)) return null;
+					return React.createElement(StoryFloorRailHost, { sessionId: props.sessionId });
+				}
 			)), "dsh-tavern: story floor rail");
 			ctx.effect(() => slots.inject("conversation.input.dock", () => slots.register(
 				{ name: "conversation.input.dock", id: "dsh-fork-session-shell", order: -200, label: "会话外壳" },
@@ -1529,6 +1542,11 @@
 				{ name: "conversation.session.header.utilities", id: "dsh-fork-bgm-player", order: 82 },
 				function (props) { return tavernStageBoundary("背景音乐", React.createElement(BgmChat, { key: props.sessionId, sessionId: props.sessionId })); }
 			)), "dsh-tavern: BGM player");
+			// Plugins' header tools (tavernUi.registerHeaderTool), left of BGM; a phone lists them in its ⋯ menu (phone-play.js).
+			ctx.effect(() => slots.inject("conversation.session.header.utilities", () => slots.register(
+				{ name: "conversation.session.header.utilities", id: "dsh-fork-plugin-header-tools", order: 81 },
+				function (props) { return React.createElement(TavernPluginHeaderTools, { key: props.sessionId, sessionId: props.sessionId }); }
+			)), "dsh-tavern: plugin header tools");
 			ctx.effect(() => slots.inject("conversation.input.dock", () => slots.register(
 				{ name: "conversation.input.dock", id: "dsh-tavern-regen", order: -110, label: "重新生成正文" },
 				function (props) { return React.createElement(React.Fragment, null, React.createElement(RegenPanel, props), React.createElement(BodyEditPanel, props)); }

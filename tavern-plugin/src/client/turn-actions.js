@@ -51,6 +51,7 @@ function ReceiptButton(props) {
 function TurnReceiptButton({ sessionId, view, receipt, storyTurn }) {
     const h = React.createElement;
     const [open, setOpen] = React.useState(false);
+    useWindowFullscreen(open); // the dialog backdrop covers the window (inline-field.js)
     const status = RECEIPT_TITLES[receipt.status] ? receipt.status : "unchanged";
     const busy = Boolean(view && view.activity && view.activity.busy);
     const changes = Array.isArray(receipt.changes) ? receipt.changes.length : 0;
@@ -104,7 +105,6 @@ function TurnActions(props) {
     const h = React.createElement;
     return h("span", { className: "dsh-fork-turn-actions" },
         latest ? h("span", { "data-fork-turn": "edit", title: "编辑正文" }, h(TavernEditBodyAction, props)) : null,
-        h("span", { "data-fork-turn": "speech" }, h(TavernReadAloudAction, props)),
         h("span", { "data-fork-turn": "receipt" }, h(ReceiptButton, props)),
         latest ? h(LatestReplyActions, props) : null);
 }

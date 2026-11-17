@@ -1,4 +1,4 @@
-import { openTurnStep, sessionEvents } from './session-events.js'
+import { markSurfaceEditTurn, openTurnStep, releaseOpeningTurn, sessionEvents } from './session-events.js'
 import { createSessionSurfaceMutator } from './session-surface-mutations.js'
 import { createRoundAnchorResolver, roundAnchor, validAnchor } from './round-anchor.js'
 import { isCompactionCheckpoint } from './compaction-checkpoint.js'
@@ -197,8 +197,10 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
   if (plan.status === 'intact') return { applied: false, anchors: [] }
   if (!/^[\w-]{1,100}$/.test(String(repairId || ''))) throw new Error('修复标识无效')
   const events = sessionEvents(session)
-  if (perRound && openTurnStep(events).turn !== null) throw new Error('按轮次修复原生表面前必须先闭合未结束回合')
-  const mutator = createSessionSurfaceMutator(session, events)
+  const openingOpen = openTurnStep(events)
+  const reuseOpeningTurn = Boolean(perRound && seeded && openingOpen.turn === 1 && openingOpen.step === 1 && plan.rounds.length > 0)
+  if (perRound && openingOpen.turn !== null && !reuseOpeningTurn) throw new Error('按轮次修复原生表面前必须先闭合未结束回合')
+  let mutator = createSessionSurfaceMutator(session, events)
   const targets = (session.surface?.nodes || []).slice(plan.keep)
   let pending = targets.length > 0
   function write(type, data) {
@@ -266,6 +268,19 @@ export function applyNativeSurfaceRepair(session, chat, plan, { repairId, perRou
   // 已有对局的局部上下文修复仍保持单回合写入，避免推动既有轮号并维持行计划假设。
   if (perRound && plan.rounds.length > 0) {
     for (const [index, round] of plan.rounds.entries()) {
+      if (index === 0 && reuseOpeningTurn) {
+        // 若 ensurePrefix 刚打开第 1 轮保留开场位且尚未闭合，直接把第 0 轮写入 turn 1 并闭合，避免原生轮号整体偏移 +1。
+        markSurfaceEditTurn(session, 1)
+        mutator.editStep((turn, step) => {
+          writeSystemHead(turn, step)
+          writeRound(index, round, turn, step)
+        })
+        releaseOpeningTurn(session)
+        if (plan.rounds.length > 1 || pending || needSystemHead) {
+          mutator = createSessionSurfaceMutator(session, sessionEvents(session))
+        }
+        continue
+      }
       mutator.editStep((turn, step) => {
         writeSystemHead(turn, step)
         writeRound(index, round, turn, step)

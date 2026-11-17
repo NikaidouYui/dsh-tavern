@@ -8,7 +8,7 @@ DSH Tavern 把扩展功能交给第三方 **DSH 插件**：文生图、文生视
 
 生图扩展另提供 `imageModels: 1`（查询已配置模型、指定来源和模型生成）、`imageLibrary: 1`（提供与查询人物、服装库），用法与数据契约见[生图模型与人物、服装库](plugin-api-data.md)。
 
-独立桌游或多角色玩法使用 `capabilities.gameMode === 1`：通过 `gameMode` 管理状态、行动和玩家投影，通过 `registerGameModeView` 提供大厅与整页界面，并可复用已注册成员的持久子代理。详见[玩法 API](plugin-api-game.md)和[浏览器 API](plugin-api-ui.md)。
+独立桌游或多角色玩法使用 `capabilities.gameMode === 1`：通过 `gameMode` 管理状态、行动和玩家投影，通过 `registerGameModeView` 提供大厅与整页界面，并可复用已注册成员的持久子代理。需要复用的轻量级快判（例如难度分级、门槛裁定或状态评估）时可探测 `capabilities.decisionJudge === 1`，直接调用宿主配置的决策模型接口 `decisionJudgeStatus()` 与 `judgeDecision(...)`。以上均见[玩法 API](plugin-api-game.md)和[浏览器 API](plugin-api-ui.md)。
 
 ## 三条承诺
 
@@ -33,7 +33,7 @@ DSH Tavern 把扩展功能交给第三方 **DSH 插件**：文生图、文生视
    └─ assets/        图片、地图、音效等静态资源（可选），用 tavernUi.assetUrl() 取地址
 ```
 
-设置了 `DSH_HOME` 时，数据目录在 `$DSH_HOME/profile-data/tavern/data/`。最小示例 [`examples/tavern-plugin-hello`](https://github.com/flizzywine/dsh-tavern/blob/main/examples/tavern-plugin-hello/) 就是这样一个文件夹，整个复制过去即可：宿主侧每轮在第一句话所在段落后挂一张图（先显示「生成中…」再换成图片），浏览器侧把正文里的 `hello###…###` 显示成徽章。把其中的 `drawImage()` 换成你的生图服务，就是一个完整的生图插件。
+设置了 `DSH_HOME` 时，数据目录在 `$DSH_HOME/profile-data/tavern/data/`。宿主侧可以通过媒体接口在本轮段落后挂图，先显示生成状态，再显示图片；实际生成服务由插件提供并遵守当次付费授权。舞台演出使用导演命令，不为这些效果添加正文协议。
 
 按「要做什么插件」找写法（配图、记忆、读变量、后台推演、接管结算等），见[常见用法](plugin-recipes.md)。
 

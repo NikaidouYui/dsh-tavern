@@ -116,6 +116,7 @@ function useRequestMonitorFeed(ui, gameId, { autoPoll = false } = {}) {
 function RequestListItem({ item, selected, onSelect }) {
   const badge = rmStatusBadge(item)
   const stats = item.stats || {}
+  const rStats = item.responseStats || null
   const ctx = item.tavernContext || null
 
   return h('button', {
@@ -141,9 +142,17 @@ function RequestListItem({ item, selected, onSelect }) {
       stats.wireUnicodeCount > 0 ? h('span', { className: 'rm-badge ok' }, '\\uXXXX') : null,
       stats.compactCodepointBlocks > 0 ? h('span', { className: 'rm-badge warn' }, '⟦U:...⟧') : null,
       stats.imageCount > 0 ? h('span', { className: 'rm-badge info' }, `图×${stats.imageCount}`) : null,
+      rStats?.toolCallCount > 0 ? h('span', { className: 'rm-badge purple' }, `返工具×${rStats.toolCallCount}`) : null,
     ),
     h('div', { className: 'rm-row' },
-      h('span', { className: 'rm-muted' }, `${stats.messageCount || 0} 条 · ~${stats.estimatedTokens || 0} tok · ${rmFormatBytes(item.wireBytes)}`),
+      h('span', { className: 'rm-muted' },
+        `${stats.messageCount || 0} 条 · ${rmFormatBytes(item.wireBytes)}` +
+        (rStats && (rStats.textChars > 0 || rStats.thinkingChars > 0)
+          ? ` → 回 ${rStats.textChars + rStats.thinkingChars} 字`
+          : item.responseBytes > 0
+            ? ` → ${rmFormatBytes(item.responseBytes)}`
+            : ''),
+      ),
       h('span', { className: 'rm-muted' }, rmFormatMs(item.durationMs)),
     ),
   )
@@ -382,7 +391,7 @@ function RequestMonitorComposerTool({ ui, sessionId, openPanel }) {
   const latest = stats?.latest
   const dotColor = !latest
     ? '#9ca3af'
-    : latest.state === 'pending'
+    : (latest.state === 'pending' || latest.state === 'aborted')
       ? '#f59e0b'
       : (latest.state === 'error' || (latest.statusCode || 0) >= 400)
         ? '#ef4444'

@@ -110,6 +110,9 @@ async function rmCopyText(text) {
 function rmStatusBadge(item) {
   if (!item) return { cls: '', label: '-' }
   if (item.state === 'pending') return { cls: 'warn', label: '发送中', pending: true }
+  if (item.state === 'aborted') {
+    return { cls: 'warn', label: item.statusCode ? `已中止 ${item.statusCode}` : '已中止' }
+  }
   if (item.state === 'error' || (item.statusCode && item.statusCode >= 400)) {
     return { cls: 'err', label: item.statusCode ? `HTTP ${item.statusCode}` : '失败' }
   }

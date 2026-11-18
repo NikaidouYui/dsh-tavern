@@ -598,6 +598,373 @@ export function decodeCompactCodepoints(text) {
   })
 }
 
+function normalizeUsage(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const inputTokens = raw.prompt_tokens ?? raw.input_tokens ?? raw.promptTokenCount ?? raw.inputTokens
+  const outputTokens = raw.completion_tokens ?? raw.output_tokens ?? raw.candidatesTokenCount ?? raw.outputTokens
+  const thinkingTokens = raw.thoughtsTokenCount ?? raw.completion_tokens_details?.reasoning_tokens ?? raw.output_tokens_details?.reasoning_tokens
+  const cacheReadTokens = raw.prompt_tokens_details?.cached_tokens ?? raw.input_tokens_details?.cached_tokens ?? raw.cache_read_input_tokens ?? raw.cachedContentTokenCount ?? raw.cacheReadTokens
+  const cacheWriteTokens = raw.cache_creation_input_tokens ?? raw.cacheWriteTokens
+  const totalTokens = raw.total_tokens ?? raw.totalTokenCount
+  const out = {}
+  if (Number.isFinite(inputTokens)) out.inputTokens = Number(inputTokens)
+  if (Number.isFinite(outputTokens)) out.outputTokens = Number(outputTokens)
+  if (Number.isFinite(thinkingTokens)) out.thinkingTokens = Number(thinkingTokens)
+  if (Number.isFinite(cacheReadTokens)) out.cacheReadTokens = Number(cacheReadTokens)
+  if (Number.isFinite(cacheWriteTokens)) out.cacheWriteTokens = Number(cacheWriteTokens)
+  if (Number.isFinite(totalTokens)) out.totalTokens = Number(totalTokens)
+  return Object.keys(out).length ? out : null
+}
+
+function mergeUsage(target, next) {
+  if (!next) return target
+  return { ...(target || {}), ...next }
+}
+
+function appendGeminiParts(parts, acc) {
+  for (const part of Array.isArray(parts) ? parts : []) {
+    if (!part || typeof part !== 'object') continue
+    if (part.thought === true && typeof part.text === 'string') {
+      acc.thinking += part.text
+    } else if (typeof part.text === 'string') {
+      acc.text += part.text
+    } else if (part.functionCall) {
+      acc.toolCalls.push({
+        id: str(part.functionCall.id),
+        name: str(part.functionCall.name),
+        argsText: stringifyCompact(part.functionCall.args ?? {}),
+      })
+    }
+  }
+}
+
+function parseSseResponse(rawText) {
+  const lines = str(rawText).split(/\r?\n/)
+  const acc = {
+    format: 'sse',
+    model: '',
+    responseId: '',
+    finishReason: '',
+    doneMarker: false,
+    eventCount: 0,
+    text: '',
+    thinking: '',
+    toolCalls: [],
+    usage: null,
+    errorMessage: '',
+  }
+  const openAiToolMap = new Map()
+  const anthropicBlocks = new Map()
+  const responsesToolMap = new Map()
+  let currentEvent = ''
+  let dataLines = []
+
+  const flushEvent = () => {
+    if (!dataLines.length) {
+      currentEvent = ''
+      return
+    }
+    const payload = dataLines.join('\n').trim()
+    dataLines = []
+    const evtName = currentEvent
+    currentEvent = ''
+    if (!payload) return
+    if (payload === '[DONE]') {
+      acc.doneMarker = true
+      return
+    }
+    let chunk
+    try {
+      chunk = JSON.parse(payload)
+    } catch {
+      return
+    }
+    if (!chunk || typeof chunk !== 'object') return
+    acc.eventCount += 1
+    if (chunk.id && !acc.responseId) acc.responseId = str(chunk.id)
+    if (chunk.model && !acc.model) acc.model = str(chunk.model)
+    if (chunk.error) {
+      acc.errorMessage = str(chunk.error?.message || stringifyCompact(chunk.error))
+    }
+
+    // 1) OpenAI Chat Completions SSE
+    if (Array.isArray(chunk.choices)) {
+      for (const choice of chunk.choices) {
+        const delta = choice?.delta
+        if (delta && typeof delta === 'object') {
+          if (typeof delta.reasoning_content === 'string') acc.thinking += delta.reasoning_content
+          if (typeof delta.reasoning === 'string') acc.thinking += delta.reasoning
+          if (typeof delta.content === 'string') acc.text += delta.content
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              const idx = Number.isInteger(tc?.index) ? tc.index : 0
+              let slot = openAiToolMap.get(idx)
+              if (!slot) {
+                slot = { id: '', name: '', argsRaw: '' }
+                openAiToolMap.set(idx, slot)
+              }
+              if (tc.id) slot.id = str(tc.id)
+              if (tc.function?.name) slot.name += str(tc.function.name)
+              if (typeof tc.function?.arguments === 'string') slot.argsRaw += tc.function.arguments
+            }
+          }
+        }
+        if (choice?.message) {
+          if (typeof choice.message.reasoning_content === 'string') acc.thinking += choice.message.reasoning_content
+          if (typeof choice.message.content === 'string') acc.text += choice.message.content
+        }
+        if (choice?.finish_reason) acc.finishReason = str(choice.finish_reason)
+      }
+      if (chunk.usage) acc.usage = mergeUsage(acc.usage, normalizeUsage(chunk.usage))
+      return
+    }
+
+    // 2) Anthropic Messages SSE
+    const type = str(chunk.type || evtName)
+    if (type === 'message_start' && chunk.message) {
+      if (chunk.message.id) acc.responseId = str(chunk.message.id)
+      if (chunk.message.model) acc.model = str(chunk.message.model)
+      if (chunk.message.usage) acc.usage = mergeUsage(acc.usage, normalizeUsage(chunk.message.usage))
+      return
+    }
+    if (type === 'content_block_start' && chunk.content_block) {
+      const idx = Number.isInteger(chunk.index) ? chunk.index : anthropicBlocks.size
+      if (chunk.content_block.type === 'tool_use') {
+        anthropicBlocks.set(idx, {
+          kind: 'tool',
+          id: str(chunk.content_block.id),
+          name: str(chunk.content_block.name),
+          argsRaw: '',
+        })
+      }
+      return
+    }
+    if (type === 'content_block_delta' && chunk.delta) {
+      const idx = Number.isInteger(chunk.index) ? chunk.index : 0
+      if (chunk.delta.type === 'text_delta') acc.text += str(chunk.delta.text)
+      else if (chunk.delta.type === 'thinking_delta') acc.thinking += str(chunk.delta.thinking)
+      else if (chunk.delta.type === 'input_json_delta') {
+        const slot = anthropicBlocks.get(idx)
+        if (slot) slot.argsRaw += str(chunk.delta.partial_json)
+      }
+      return
+    }
+    if (type === 'message_delta') {
+      if (chunk.delta?.stop_reason) acc.finishReason = str(chunk.delta.stop_reason)
+      if (chunk.usage) acc.usage = mergeUsage(acc.usage, normalizeUsage(chunk.usage))
+      return
+    }
+    if (type === 'message_stop') {
+      acc.doneMarker = true
+      return
+    }
+
+    // 3) OpenAI Responses SSE
+    if (type === 'response.output_text.delta') {
+      acc.text += str(chunk.delta)
+      return
+    }
+    if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') {
+      acc.thinking += str(chunk.delta)
+      return
+    }
+    if (type === 'response.output_item.added' && chunk.item?.type === 'function_call') {
+      responsesToolMap.set(str(chunk.item.id || chunk.output_index), {
+        id: str(chunk.item.call_id || chunk.item.id),
+        name: str(chunk.item.name),
+        argsRaw: str(chunk.item.arguments),
+      })
+      return
+    }
+    if (type === 'response.function_call_arguments.delta') {
+      const slot = responsesToolMap.get(str(chunk.item_id || chunk.output_index))
+      if (slot) slot.argsRaw += str(chunk.delta)
+      return
+    }
+    if (type === 'response.completed' && chunk.response) {
+      acc.doneMarker = true
+      if (chunk.response.id) acc.responseId = str(chunk.response.id)
+      if (chunk.response.model) acc.model = str(chunk.response.model)
+      if (chunk.response.status) acc.finishReason = str(chunk.response.status)
+      if (chunk.response.usage) acc.usage = mergeUsage(acc.usage, normalizeUsage(chunk.response.usage))
+      return
+    }
+
+    // 4) Gemini Native SSE
+    if (Array.isArray(chunk.candidates)) {
+      for (const cand of chunk.candidates) {
+        appendGeminiParts(cand?.content?.parts, acc)
+        if (cand?.finishReason) acc.finishReason = str(cand.finishReason)
+      }
+      if (chunk.modelVersion && !acc.model) acc.model = str(chunk.modelVersion)
+      if (chunk.usageMetadata) acc.usage = mergeUsage(acc.usage, normalizeUsage(chunk.usageMetadata))
+    }
+  }
+
+  for (const line of lines) {
+    if (line === '') {
+      flushEvent()
+    } else if (line.startsWith('event:')) {
+      currentEvent = line.slice(6).trim()
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart())
+    }
+  }
+  flushEvent()
+
+  for (const slot of Array.from(openAiToolMap.entries()).sort((a, b) => a[0] - b[0]).map(e => e[1])) {
+    acc.toolCalls.push({ id: slot.id, name: slot.name, argsText: tryPrettifyJson(slot.argsRaw) })
+  }
+  for (const slot of anthropicBlocks.values()) {
+    if (slot.kind === 'tool') {
+      acc.toolCalls.push({ id: slot.id, name: slot.name, argsText: tryPrettifyJson(slot.argsRaw) })
+    }
+  }
+  for (const slot of responsesToolMap.values()) {
+    acc.toolCalls.push({ id: slot.id, name: slot.name, argsText: tryPrettifyJson(slot.argsRaw) })
+  }
+
+  return acc
+}
+
+function parseJsonResponseObject(parsed) {
+  const acc = {
+    format: 'json',
+    model: '',
+    responseId: '',
+    finishReason: '',
+    doneMarker: true,
+    eventCount: 1,
+    text: '',
+    thinking: '',
+    toolCalls: [],
+    usage: null,
+    errorMessage: '',
+  }
+  const items = Array.isArray(parsed) ? parsed : [parsed]
+  acc.eventCount = items.length
+  for (const obj of items) {
+    if (!obj || typeof obj !== 'object') continue
+    if (obj.id && !acc.responseId) acc.responseId = str(obj.id)
+    if ((obj.model || obj.modelVersion) && !acc.model) acc.model = str(obj.model || obj.modelVersion)
+    if (obj.error) {
+      acc.errorMessage = str(obj.error?.message || stringifyCompact(obj.error))
+    }
+    // OpenAI Chat
+    if (Array.isArray(obj.choices)) {
+      for (const c of obj.choices) {
+        const msg = c?.message || c?.delta
+        if (msg) {
+          if (typeof msg.reasoning_content === 'string') acc.thinking += msg.reasoning_content
+          if (typeof msg.content === 'string') acc.text += msg.content
+          if (Array.isArray(msg.tool_calls)) {
+            for (const tc of msg.tool_calls) {
+              acc.toolCalls.push({
+                id: str(tc.id),
+                name: str(tc.function?.name || tc.name),
+                argsText: typeof tc.function?.arguments === 'string'
+                  ? tryPrettifyJson(tc.function.arguments)
+                  : stringifyCompact(tc.function?.arguments ?? {}),
+              })
+            }
+          }
+        }
+        if (c?.finish_reason) acc.finishReason = str(c.finish_reason)
+      }
+      if (obj.usage) acc.usage = mergeUsage(acc.usage, normalizeUsage(obj.usage))
+    }
+    // Anthropic Messages
+    if (obj.type === 'message' && Array.isArray(obj.content)) {
+      for (const blk of obj.content) {
+        if (!blk || typeof blk !== 'object') continue
+        if (blk.type === 'thinking') acc.thinking += str(blk.thinking)
+        else if (blk.type === 'text') acc.text += str(blk.text)
+        else if (blk.type === 'tool_use') {
+          acc.toolCalls.push({ id: str(blk.id), name: str(blk.name), argsText: stringifyCompact(blk.input ?? {}) })
+        }
+      }
+      if (obj.stop_reason) acc.finishReason = str(obj.stop_reason)
+      if (obj.usage) acc.usage = mergeUsage(acc.usage, normalizeUsage(obj.usage))
+    }
+    // OpenAI Responses
+    if (Array.isArray(obj.output)) {
+      for (const outItem of obj.output) {
+        if (!outItem || typeof outItem !== 'object') continue
+        if (outItem.type === 'reasoning' && Array.isArray(outItem.summary)) {
+          acc.thinking += outItem.summary.map(s => s?.text || '').join('\n')
+        } else if (outItem.type === 'message' && Array.isArray(outItem.content)) {
+          for (const part of outItem.content) {
+            if (part?.text) acc.text += str(part.text)
+          }
+        } else if (outItem.type === 'function_call') {
+          acc.toolCalls.push({
+            id: str(outItem.call_id || outItem.id),
+            name: str(outItem.name),
+            argsText: typeof outItem.arguments === 'string' ? tryPrettifyJson(outItem.arguments) : stringifyCompact(outItem.arguments ?? {}),
+          })
+        }
+      }
+      if (obj.status) acc.finishReason = str(obj.status)
+      if (obj.usage) acc.usage = mergeUsage(acc.usage, normalizeUsage(obj.usage))
+    }
+    // Gemini Native
+    if (Array.isArray(obj.candidates)) {
+      for (const cand of obj.candidates) {
+        appendGeminiParts(cand?.content?.parts, acc)
+        if (cand?.finishReason) acc.finishReason = str(cand.finishReason)
+      }
+      if (obj.usageMetadata) acc.usage = mergeUsage(acc.usage, normalizeUsage(obj.usageMetadata))
+    }
+  }
+  return acc
+}
+
+/** 解析真实 HTTP 响应体（支持 SSE 流式分片、非流式 JSON 与纯文本）。 */
+export function parseResponsePayload(rawText, { contentType = '' } = {}) {
+  const text = str(rawText)
+  if (!text.trim()) {
+    return {
+      format: 'empty',
+      model: '',
+      responseId: '',
+      finishReason: '',
+      doneMarker: false,
+      eventCount: 0,
+      text: '',
+      thinking: '',
+      toolCalls: [],
+      usage: null,
+      errorMessage: '',
+    }
+  }
+  const ct = str(contentType).toLowerCase()
+  const looksLikeSse = ct.includes('text/event-stream') || /^(?:event:|data:)/m.test(text)
+  if (looksLikeSse) {
+    const sse = parseSseResponse(text)
+    if (sse.eventCount > 0 || sse.doneMarker) return sse
+  }
+  const trimmed = text.trimStart()
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text)
+      return parseJsonResponseObject(parsed)
+    } catch {}
+  }
+  return {
+    format: 'text',
+    model: '',
+    responseId: '',
+    finishReason: '',
+    doneMarker: false,
+    eventCount: 0,
+    text,
+    thinking: '',
+    toolCalls: [],
+    usage: null,
+    errorMessage: '',
+  }
+}
+
 /** 格式化单条记录为人类可读的 Markdown 文本。 */
 export function formatRecordAsMarkdown(record) {
   const p = record.parsed || {}
@@ -647,6 +1014,33 @@ export function formatRecordAsMarkdown(record) {
         lines.push(part.contentText)
         lines.push('```')
       }
+    }
+  }
+  const resp = record.parsedResponse
+  if (resp && resp.format !== 'empty') {
+    lines.push('')
+    lines.push('## 模型响应')
+    if (resp.finishReason || resp.usage) {
+      lines.push('')
+      lines.push(`- **格式**：\`${resp.format}\` · **结束原因**：\`${resp.finishReason || '-'}\``)
+      if (resp.usage) lines.push(`- **Token 用量**：\`${JSON.stringify(resp.usage)}\``)
+    }
+    if (resp.thinking) {
+      lines.push('')
+      lines.push('### 思考过程')
+      lines.push(resp.thinking)
+    }
+    if (resp.text) {
+      lines.push('')
+      lines.push('### 正文输出')
+      lines.push(resp.text)
+    }
+    for (const tc of resp.toolCalls || []) {
+      lines.push('')
+      lines.push(`### 工具调用 \`${tc.name}\``)
+      lines.push('```json')
+      lines.push(tc.argsText)
+      lines.push('```')
     }
   }
   return lines.join('\n')

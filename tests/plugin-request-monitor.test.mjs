@@ -21,6 +21,7 @@ import {
   maskSecret,
   normalizeAndRedactHeaders,
   parseLlmPayload,
+  parseResponsePayload,
   redactUrl,
 } from '../tavern-plugin/packages/dsh-tavern-request-monitor/lib/index.js'
 
@@ -401,6 +402,7 @@ test('真实 HTTP 服务器 + installToolProtocolFetchPatch 400降级重试 + Wi
     assert.equal(latest.statusCode, 429)
     assert.equal(latest.state, 'error')
     assert.ok(engine.getDetail(latest.id).errorResponseText.includes('rate limit exceeded'))
+    assert.equal(engine.getDetail(latest.id).parsedResponse.errorMessage, 'rate limit exceeded')
   } finally {
     engine.dispose()
     restoreProtocol()
@@ -565,3 +567,101 @@ test('浏览器侧 client.js 可正常被 __ModuleLoader__ 加载并注册面板
   assert.ok(registered.panel.render({ gameId: 'g1' }))
   assert.ok(registered.composerTool.render({ sessionId: 'g1' }))
 })
+
+test('响应体解析器（SSE/JSON）与 HTTP 200 流式旁路捕获及 Abort 不误报红灯', async () => {
+  // 1) OpenAI SSE 拼接思考、正文、工具调用与 Usage
+  const sseText = [
+    'data: {"id":"cmpl-1","model":"gemini-4-hydrogen","choices":[{"delta":{"reasoning_content":"先分析局势"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"content":"你好，"}}]}',
+    '',
+    'data: {"choices":[{"delta":{"content":"冒险者！","tool_calls":[{"index":0,"id":"call_9","function":{"name":"set_state","arguments":"{\\"hp\\":"}}]}}]}',
+    '',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"99}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":120,"completion_tokens":35,"total_tokens":155}}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n')
+  const parsedSse = parseResponsePayload(sseText, { contentType: 'text/event-stream' })
+  assert.equal(parsedSse.format, 'sse')
+  assert.equal(parsedSse.model, 'gemini-4-hydrogen')
+  assert.equal(parsedSse.thinking, '先分析局势')
+  assert.equal(parsedSse.text, '你好，冒险者！')
+  assert.equal(parsedSse.toolCalls.length, 1)
+  assert.equal(parsedSse.toolCalls[0].name, 'set_state')
+  assert.ok(parsedSse.toolCalls[0].argsText.includes('"hp": 99'))
+  assert.equal(parsedSse.finishReason, 'tool_calls')
+  assert.equal(parsedSse.usage.outputTokens, 35)
+  assert.equal(parsedSse.doneMarker, true)
+
+  // 2) 真实 SSE 流旁路捕获 + 收到第一段后主动 abort 不误报红色 error
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    if (req.url === '/v1/stream-full') {
+      res.write('data: {"model":"gpt-5","choices":[{"delta":{"content":"完整回复"}}]}\n\n')
+      res.write('data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4}}\n\n')
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
+    }
+    res.write('data: {"model":"gpt-5","choices":[{"delta":{"content":"部分输出"}}]}\n\n')
+    setTimeout(() => {
+      if (!res.writableEnded) res.end()
+    }, 300)
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  const engine = createRequestMonitorEngine({
+    getConfig: () => ({
+      enabled: true,
+      filterMode: 'llm_only',
+      maxRecords: 20,
+      maxTotalBytes: 8 * 1024 * 1024,
+      maxSingleBodyBytes: 4 * 1024 * 1024,
+      captureWireBody: true,
+    }),
+  })
+
+  try {
+    // 场景 A：正常流式请求
+    const resA = await fetch(`http://127.0.0.1:${port}/v1/stream-full`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    await resA.text()
+    await new Promise(r => setTimeout(r, 40))
+    const sumA = engine.listSummaries()[0]
+    assert.equal(sumA.state, 'completed')
+    assert.equal(sumA.responseStats.textChars, 4)
+    assert.equal(sumA.responseStats.finishReason, 'stop')
+    const detailA = engine.getDetail(sumA.id)
+    assert.equal(detailA.parsedResponse.text, '完整回复')
+
+    // 场景 B：读到一段后客户端 abort，不应误标为 error，且保留已收内容
+    const ac = new AbortController()
+    const resB = await fetch(`http://127.0.0.1:${port}/v1/stream-abort`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5', stream: true, messages: [{ role: 'user', content: 'abort me' }] }),
+      signal: ac.signal,
+    })
+    const reader = resB.body.getReader()
+    await reader.read()
+    ac.abort()
+    await reader.read().catch(() => {})
+    await new Promise(r => setTimeout(r, 60))
+
+    const sumB = engine.listSummaries()[0]
+    assert.equal(sumB.statusCode, 200)
+    assert.notEqual(sumB.state, 'error')
+    assert.equal(sumB.error, '')
+    const detailB = engine.getDetail(sumB.id)
+    assert.equal(detailB.parsedResponse.text, '部分输出')
+  } finally {
+    engine.dispose()
+    server.closeAllConnections?.()
+    await new Promise(resolve => server.close(resolve))
+  }
+})
+

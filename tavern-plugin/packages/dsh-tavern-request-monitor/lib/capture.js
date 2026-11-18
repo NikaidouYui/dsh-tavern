@@ -5,6 +5,7 @@ import {
   getHeaderIgnoreCase,
   normalizeAndRedactHeaders,
   parseLlmPayload,
+  parseResponsePayload,
   redactUrl,
   str,
 } from './parser.js'
@@ -12,6 +13,7 @@ import {
 const NON_LLM_PATH_RE = /^\/(?:api\/(?:tavern|remote|plugins|settings|auth|sessions)|rpc|assets|__)/i
 const LLM_ENDPOINT_RE = /(?:\/chat\/completions|\/v\d+\/messages|\/responses|:(?:stream)?generateContent|\/api\/(?:chat|generate))(?:\?|$)/i
 const MAX_ERROR_TEXT_CHARS = 16 * 1024
+const MAX_RESPONSE_CAPTURE_BYTES = 2 * 1024 * 1024
 const CONTEXT_TTL_MS = 30 * 1000
 const MAX_PENDING_CONTEXTS = 40
 
@@ -61,6 +63,7 @@ function toSummary(record) {
   const parsed = record.parsed || {}
   const stats = parsed.stats || {}
   const ctx = record.tavernContext || null
+  const resp = record.parsedResponse || null
   return {
     id: record.id,
     seq: record.seq,
@@ -75,8 +78,10 @@ function toSummary(record) {
     ttfbMs: record.ttfbMs,
     durationMs: record.durationMs,
     wireBytes: record.wireBytes,
+    responseBytes: record.responseBytes || 0,
     rawTruncated: record.rawTruncated === true,
     error: record.error || '',
+    abortReason: record.abortReason || '',
     protocol: parsed.protocol || 'generic-json',
     model: parsed.model || ctx?.model || '',
     stream: parsed.stream === true,
@@ -91,6 +96,16 @@ function toSummary(record) {
       compactCodepointBlocks: stats.compactCodepointBlocks || 0,
       sessionFingerprint: stats.sessionFingerprint || '',
     },
+    responseStats: resp
+      ? {
+          format: resp.format || 'empty',
+          textChars: str(resp.text).length,
+          thinkingChars: str(resp.thinking).length,
+          toolCallCount: Array.isArray(resp.toolCalls) ? resp.toolCalls.length : 0,
+          finishReason: resp.finishReason || '',
+          usage: resp.usage || null,
+        }
+      : null,
     tavernContext: ctx
       ? {
           gameId: ctx.gameId,
@@ -292,7 +307,12 @@ export function createRequestMonitorEngine({
       ttfbMs: null,
       durationMs: null,
       error: '',
+      abortReason: '',
       errorResponseText: '',
+      responseRawText: '',
+      responseBytes: 0,
+      responseTruncated: false,
+      parsedResponse: null,
       wireBytes,
       rawTruncated,
       rawBodyText: storedRaw,
@@ -440,6 +460,137 @@ export function createRequestMonitorEngine({
     } catch {}
   }
 
+  function applyCapturedResponse(targetId, rawText, { contentType = '', statusCode = null, truncated = false, aborted = false, abortMessage = '', startedAt = 0 } = {}) {
+    const rec = records.get(targetId)
+    if (!rec) return
+    const text = str(rawText)
+    const parsedResponse = parseResponsePayload(text, { contentType })
+    const effectiveStatus = statusCode ?? rec.statusCode
+    const responseBytes = Buffer.byteLength(text, 'utf8')
+
+    let nextState = rec.state
+    let nextError = rec.error
+    let nextAbort = rec.abortReason
+    if (effectiveStatus !== null && effectiveStatus >= 400) {
+      nextState = 'error'
+    } else if (aborted) {
+      const hasFinishedData = parsedResponse.doneMarker || Boolean(parsedResponse.finishReason) || parsedResponse.format === 'json'
+      if (hasFinishedData) {
+        nextState = 'completed'
+        nextError = ''
+        nextAbort = ''
+      } else {
+        nextState = 'aborted'
+        nextError = ''
+        nextAbort = abortMessage || '连接已中止'
+      }
+    } else {
+      nextState = 'completed'
+      nextError = ''
+      nextAbort = ''
+    }
+
+    const oldRespBytes = rec._trackedRespBytes || 0
+    const nextTrackedRespBytes = Math.min(responseBytes, MAX_RESPONSE_CAPTURE_BYTES)
+    totalApproxBytes = Math.max(0, totalApproxBytes - oldRespBytes + nextTrackedRespBytes)
+
+    updateRecord(targetId, {
+      statusCode: effectiveStatus,
+      state: nextState,
+      error: nextError,
+      abortReason: nextAbort,
+      durationMs: rec.durationMs ?? (startedAt ? Math.max(0, Date.now() - startedAt) : null),
+      responseRawText: text,
+      responseBytes,
+      responseTruncated: truncated,
+      parsedResponse,
+      _trackedRespBytes: nextTrackedRespBytes,
+      approxBytes: (rec.approxBytes || 0) - oldRespBytes + nextTrackedRespBytes,
+      ...(effectiveStatus >= 400 && text ? { errorResponseText: text.slice(0, MAX_ERROR_TEXT_CHARS) } : {}),
+    })
+  }
+
+  function tapClonedResponse(targetId, clonedResponse, startedAt) {
+    if (!targetId || !clonedResponse) return
+    const statusCode = Number(clonedResponse.status) || null
+    const contentType = str(clonedResponse.headers?.get?.('content-type'))
+    const respHeaders = normalizeAndRedactHeaders(clonedResponse.headers)
+    if (respHeaders.length) {
+      const existing = records.get(targetId)
+      if (existing && (!existing.responseHeaders || !existing.responseHeaders.length)) {
+        updateRecord(targetId, { responseHeaders: respHeaders })
+      }
+    }
+
+    if (!clonedResponse.body || typeof clonedResponse.body.getReader !== 'function') {
+      if (typeof clonedResponse.text === 'function') {
+        void clonedResponse.text().then(text => {
+          applyCapturedResponse(targetId, text, { contentType, statusCode, startedAt })
+        }).catch(() => {})
+      }
+      return
+    }
+
+    void (async () => {
+      const reader = clonedResponse.body.getReader()
+      const decoder = new TextDecoder()
+      let captured = ''
+      let capturedBytes = 0
+      let truncated = false
+      let aborted = false
+      let abortMessage = ''
+      let lastSyncAt = Date.now()
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value && value.byteLength > 0) {
+            if (capturedBytes < MAX_RESPONSE_CAPTURE_BYTES) {
+              const room = MAX_RESPONSE_CAPTURE_BYTES - capturedBytes
+              const slice = value.byteLength > room ? value.subarray(0, room) : value
+              if (value.byteLength > room) truncated = true
+              captured += decoder.decode(slice, { stream: true })
+              capturedBytes += slice.byteLength
+            } else {
+              truncated = true
+            }
+            const now = Date.now()
+            if (now - lastSyncAt >= 350) {
+              lastSyncAt = now
+              const rec = records.get(targetId)
+              if (rec && rec.state === 'pending') {
+                updateRecord(targetId, {
+                  responseRawText: captured,
+                  responseBytes: capturedBytes,
+                  responseTruncated: truncated,
+                  parsedResponse: parseResponsePayload(captured, { contentType }),
+                })
+              }
+            }
+          }
+        }
+        captured += decoder.decode()
+      } catch (err) {
+        aborted = true
+        abortMessage = str(err?.message || err)
+      } finally {
+        try { reader.releaseLock() } catch {}
+      }
+
+      if (!disposed) {
+        applyCapturedResponse(targetId, captured, {
+          contentType,
+          statusCode,
+          truncated,
+          aborted,
+          abortMessage,
+          startedAt,
+        })
+      }
+    })()
+  }
+
   const onUndiciTrailers = ({ request }) => {
     try {
       const state = undiciMap.get(request)
@@ -461,9 +612,31 @@ export function createRequestMonitorEngine({
       const state = undiciMap.get(request)
       if (!state) return
       const durationMs = Math.max(0, Date.now() - state.createdAt)
+      const errMsg = str(error?.message || error || 'HTTP 请求失败')
+      const isAbort = error?.name === 'AbortError' || /\babort(?:ed)?\b/i.test(errMsg)
+      const hasSuccessStatus = state.statusCode !== null && state.statusCode >= 200 && state.statusCode < 400
       state.durationMs = durationMs
+
+      if (hasSuccessStatus && isAbort) {
+        state.terminalState = 'aborted'
+        state.terminalError = ''
+        if (state.recordId) {
+          const rec = records.get(state.recordId)
+          // 若 tapClonedResponse 已将状态定稿为 completed，则不回退成 aborted
+          if (rec && rec.state !== 'completed') {
+            updateRecord(state.recordId, {
+              state: 'aborted',
+              durationMs,
+              error: '',
+              abortReason: rec.abortReason || errMsg,
+            })
+          }
+        }
+        return
+      }
+
       state.terminalState = 'error'
-      state.terminalError = str(error?.message || error || 'HTTP 请求失败')
+      state.terminalError = errMsg
       if (state.recordId) {
         updateRecord(state.recordId, {
           state: 'error',
@@ -547,18 +720,11 @@ export function createRequestMonitorEngine({
           }
         }
 
-        // 仅在 HTTP 错误状态时安全 clone 读取错误正文，绝不触碰 200 SSE 流
+        // 旁路克隆响应体（同时覆盖 200 SSE 流式响应、非流式 JSON 与 4xx/5xx 错误响应），绝不阻断调用方流消费
         const targetId = traceStore.lastRecordId || fallbackRecord?.id
-        if (targetId && response && response.status >= 400 && typeof response.clone === 'function') {
+        if (targetId && response && typeof response.clone === 'function') {
           try {
-            const errText = await response.clone().text()
-            if (errText) {
-              updateRecord(targetId, {
-                statusCode: response.status,
-                state: 'error',
-                errorResponseText: errText.slice(0, MAX_ERROR_TEXT_CHARS),
-              })
-            }
+            tapClonedResponse(targetId, response.clone(), startedAt)
           } catch {}
         }
         return response

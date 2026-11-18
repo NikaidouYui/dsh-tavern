@@ -534,6 +534,9 @@ async function rmCopyText(text) {
 function rmStatusBadge(item) {
   if (!item) return { cls: '', label: '-' }
   if (item.state === 'pending') return { cls: 'warn', label: '发送中', pending: true }
+  if (item.state === 'aborted') {
+    return { cls: 'warn', label: item.statusCode ? `已中止 ${item.statusCode}` : '已中止' }
+  }
   if (item.state === 'error' || (item.statusCode && item.statusCode >= 400)) {
     return { cls: 'err', label: item.statusCode ? `HTTP ${item.statusCode}` : '失败' }
   }
@@ -693,6 +696,8 @@ function RequestDetailView({ ui, record, loading, compact = false }) {
   const [expandAll, setExpandAll] = useState(false)
   const [prettyWire, setPrettyWire] = useState(true)
   const [rawCharLimit, setRawCharLimit] = useState(60000)
+  const [respRawMode, setRespRawMode] = useState(false)
+  const [respSearch, setRespSearch] = useState('')
   const [zoomSrc, setZoomSrc] = useState('')
   const [toolSearch, setToolSearch] = useState('')
 
@@ -712,6 +717,7 @@ function RequestDetailView({ ui, record, loading, compact = false }) {
 
   const parsed = record.parsed || {}
   const stats = parsed.stats || {}
+  const resp = record.parsedResponse || null
   const ctx = record.tavernContext || null
   const badge = rmStatusBadge(record)
   const messages = Array.isArray(parsed.messages) ? parsed.messages : []
@@ -792,6 +798,10 @@ function RequestDetailView({ ui, record, loading, compact = false }) {
         stats.imageCount > 0 ? h('span', { className: 'rm-badge info' }, `图片 ×${stats.imageCount}`) : null,
         stats.toolCount > 0 ? h('span', { className: 'rm-badge purple' }, `工具定义 ×${stats.toolCount}`) : null,
         stats.sessionFingerprint ? h('span', { className: 'rm-badge' }, `SID: ${stats.sessionFingerprint}`) : null,
+        resp?.usage?.outputTokens !== undefined
+          ? h('span', { className: 'rm-badge ok' }, `实测 Token: 入 ${resp.usage.inputTokens ?? '-'} / 出 ${resp.usage.outputTokens}`)
+          : null,
+        resp?.finishReason ? h('span', { className: 'rm-badge' }, `结束: ${resp.finishReason}`) : null,
       ),
       (record.error || record.errorResponseText)
         ? h('div', { className: 'rm-block-box', style: { borderColor: 'rgba(239, 68, 68, 0.5)' } },
@@ -800,12 +810,24 @@ function RequestDetailView({ ui, record, loading, compact = false }) {
             record.errorResponseText ? h('pre', { className: 'rm-pre' }, record.errorResponseText) : null,
           )
         : null,
+      (!record.error && record.state === 'aborted' && record.abortReason)
+        ? h('div', { className: 'rm-block-box', style: { borderColor: 'rgba(217, 119, 6, 0.45)' } },
+            h('span', { className: 'rm-badge warn' }, '连接中止提示'),
+            h('div', { className: 'rm-muted' }, `${record.abortReason}（已接收 ${rmFormatBytes(record.responseBytes || 0)} 响应数据）`),
+          )
+        : null,
     ),
 
     // 标签栏
     h('div', { className: 'rm-tabs' },
       h('button', { type: 'button', className: tab === 'messages' ? 'rm-tab active' : 'rm-tab', onClick: () => setTab('messages') },
         `对话阅读 (${messages.length})`),
+      h('button', { type: 'button', className: tab === 'response' ? 'rm-tab active' : 'rm-tab', onClick: () => setTab('response') },
+        resp && resp.format !== 'empty'
+          ? `响应体 (${(resp.text || '').length + (resp.thinking || '').length} 字)`
+          : record.responseBytes > 0
+            ? `响应体 (${rmFormatBytes(record.responseBytes)})`
+            : '响应体'),
       h('button', { type: 'button', className: tab === 'params' ? 'rm-tab active' : 'rm-tab', onClick: () => setTab('params') },
         `参数与工具 (${tools.length})`),
       h('button', { type: 'button', className: tab === 'http' ? 'rm-tab active' : 'rm-tab', onClick: () => setTab('http') },
@@ -870,6 +892,135 @@ function RequestDetailView({ ui, record, loading, compact = false }) {
                   onZoomImage: src => setZoomSrc(src),
                 }),
               ),
+        )
+      : null,
+
+    tab === 'response'
+      ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+          h('div', { className: 'rm-card' },
+            h('div', { className: 'rm-row' },
+              h('div', { className: 'rm-row-left' },
+                h('span', { className: 'rm-badge info' },
+                  resp?.format === 'sse'
+                    ? `SSE 流式 (${resp.eventCount || 0} 个事件)`
+                    : resp?.format === 'json'
+                      ? 'JSON 响应'
+                      : resp?.format === 'text'
+                        ? '文本响应'
+                        : '暂无响应体'),
+                resp?.model ? h('span', { className: 'rm-badge' }, `模型: ${resp.model}`) : null,
+                resp?.finishReason ? h('span', { className: 'rm-badge ok' }, `结束原因: ${resp.finishReason}`) : null,
+                record.responseBytes > 0 ? h('span', { className: 'rm-muted' }, `接收 ${rmFormatBytes(record.responseBytes)}`) : null,
+                record.responseTruncated ? h('span', { className: 'rm-badge warn' }, '超长响应已截断') : null,
+              ),
+              h('div', { className: 'rm-row-left' },
+                h('button', {
+                  type: 'button',
+                  className: !respRawMode ? 'rm-btn active' : 'rm-btn',
+                  onClick: () => setRespRawMode(false),
+                }, '可读视图'),
+                h('button', {
+                  type: 'button',
+                  className: respRawMode ? 'rm-btn active' : 'rm-btn',
+                  onClick: () => setRespRawMode(true),
+                }, '原始响应 (SSE/JSON)'),
+                record.responseRawText
+                  ? h(rmCopyButton, {
+                      label: '复制响应',
+                      getText: () => respRawMode
+                        ? record.responseRawText
+                        : [
+                            resp?.thinking ? `[Thinking]\n${resp.thinking}` : '',
+                            resp?.text || '',
+                            ...(resp?.toolCalls || []).map(tc => `[ToolCall ${tc.name}]\n${tc.argsText}`),
+                          ].filter(Boolean).join('\n\n') || record.responseRawText,
+                    })
+                  : null,
+              ),
+            ),
+            resp?.usage
+              ? h('div', { className: 'rm-kv-grid' },
+                  [
+                    ['输入 Token', resp.usage.inputTokens],
+                    ['输出 Token', resp.usage.outputTokens],
+                    ['思考 Token', resp.usage.thinkingTokens],
+                    ['缓存命中', resp.usage.cacheReadTokens],
+                    ['缓存写入', resp.usage.cacheWriteTokens],
+                    ['总 Token', resp.usage.totalTokens],
+                  ].filter(([, val]) => val !== undefined).map(([label, val]) =>
+                    h('div', { key: label, className: 'rm-kv-cell' },
+                      h('span', { className: 'rm-muted' }, label),
+                      h('span', { className: 'rm-mono', style: { fontWeight: 600 } }, String(val)),
+                    ),
+                  ),
+                )
+              : null,
+          ),
+          respRawMode
+            ? h('div', { className: 'rm-card' },
+                h('pre', { className: 'rm-pre', style: { maxHeight: compact ? '380px' : '560px', overflowY: 'auto' } },
+                  (record.responseRawText || '（暂无原始响应数据）').slice(0, rawCharLimit),
+                ),
+                (record.responseRawText || '').length > rawCharLimit
+                  ? h('div', { className: 'rm-row' },
+                      h('span', { className: 'rm-muted' }, `当前显示前 ${rawCharLimit} / ${record.responseRawText.length} 字符`),
+                      h('button', {
+                        type: 'button',
+                        className: 'rm-btn primary',
+                        onClick: () => setRawCharLimit(prev => prev + 120000),
+                      }, '加载更多 (+120K 字符)'),
+                    )
+                  : null,
+              )
+            : (!resp || resp.format === 'empty')
+              ? h('div', { className: 'rm-card' },
+                  h('span', { className: 'rm-muted' },
+                    record.state === 'pending'
+                      ? '正在等待或接收模型流式响应…'
+                      : '本次请求未捕获到响应正文（可能为内部 400 重试中间件消费或空响应体）。'),
+                )
+              : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } },
+                  h('input', {
+                    className: 'rm-input',
+                    type: 'search',
+                    value: respSearch,
+                    placeholder: '在响应内容中搜索关键词…',
+                    onChange: e => setRespSearch(e.target.value),
+                  }),
+                  resp.errorMessage
+                    ? h('div', { className: 'rm-block-box', style: { borderColor: 'rgba(239, 68, 68, 0.5)' } },
+                        h('span', { className: 'rm-badge err' }, '服务端返回错误'),
+                        h('pre', { className: 'rm-pre' }, resp.errorMessage),
+                      )
+                    : null,
+                  resp.thinking
+                    ? h('div', { className: 'rm-msg role-system' },
+                        h('div', { className: 'rm-row' },
+                          h('span', { className: 'rm-badge warn' }, `思考过程 · ${resp.thinking.length} 字`),
+                          h(rmCopyButton, { label: '复制思考', getText: () => resp.thinking }),
+                        ),
+                        h('div', { className: 'rm-prose' }, rmHighlightText(resp.thinking, respSearch)),
+                      )
+                    : null,
+                  resp.text
+                    ? h('div', { className: 'rm-msg role-assistant' },
+                        h('div', { className: 'rm-row' },
+                          h('span', { className: 'rm-badge ok' }, `正文输出 · ${resp.text.length} 字`),
+                          h(rmCopyButton, { label: '复制正文', getText: () => resp.text }),
+                        ),
+                        h('div', { className: 'rm-prose' }, rmHighlightText(resp.text, respSearch)),
+                      )
+                    : null,
+                  ...(resp.toolCalls || []).map((tc, i) =>
+                    h('div', { key: `${tc.id || tc.name}-${i}`, className: 'rm-msg role-tool' },
+                      h('div', { className: 'rm-row' },
+                        h('span', { className: 'rm-badge purple' }, `模型工具调用 · ${tc.name || 'unknown'}`),
+                        tc.id ? h('span', { className: 'rm-muted rm-mono' }, tc.id) : null,
+                      ),
+                      h('pre', { className: 'rm-pre' }, rmHighlightText(tc.argsText || '{}', respSearch)),
+                    ),
+                  ),
+                ),
         )
       : null,
 
@@ -1103,6 +1254,7 @@ function useRequestMonitorFeed(ui, gameId, { autoPoll = false } = {}) {
 function RequestListItem({ item, selected, onSelect }) {
   const badge = rmStatusBadge(item)
   const stats = item.stats || {}
+  const rStats = item.responseStats || null
   const ctx = item.tavernContext || null
 
   return h('button', {
@@ -1128,9 +1280,17 @@ function RequestListItem({ item, selected, onSelect }) {
       stats.wireUnicodeCount > 0 ? h('span', { className: 'rm-badge ok' }, '\\uXXXX') : null,
       stats.compactCodepointBlocks > 0 ? h('span', { className: 'rm-badge warn' }, '⟦U:...⟧') : null,
       stats.imageCount > 0 ? h('span', { className: 'rm-badge info' }, `图×${stats.imageCount}`) : null,
+      rStats?.toolCallCount > 0 ? h('span', { className: 'rm-badge purple' }, `返工具×${rStats.toolCallCount}`) : null,
     ),
     h('div', { className: 'rm-row' },
-      h('span', { className: 'rm-muted' }, `${stats.messageCount || 0} 条 · ~${stats.estimatedTokens || 0} tok · ${rmFormatBytes(item.wireBytes)}`),
+      h('span', { className: 'rm-muted' },
+        `${stats.messageCount || 0} 条 · ${rmFormatBytes(item.wireBytes)}` +
+        (rStats && (rStats.textChars > 0 || rStats.thinkingChars > 0)
+          ? ` → 回 ${rStats.textChars + rStats.thinkingChars} 字`
+          : item.responseBytes > 0
+            ? ` → ${rmFormatBytes(item.responseBytes)}`
+            : ''),
+      ),
       h('span', { className: 'rm-muted' }, rmFormatMs(item.durationMs)),
     ),
   )
@@ -1369,7 +1529,7 @@ function RequestMonitorComposerTool({ ui, sessionId, openPanel }) {
   const latest = stats?.latest
   const dotColor = !latest
     ? '#9ca3af'
-    : latest.state === 'pending'
+    : (latest.state === 'pending' || latest.state === 'aborted')
       ? '#f59e0b'
       : (latest.state === 'error' || (latest.statusCode || 0) >= 400)
         ? '#ef4444'

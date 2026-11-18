@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "revision": "3f4e0ffe304010814813ff71afd43eb727866b31",
+  "revision": "0a0388c4d185bef0112c790a62719186137f3c9a",
   "releaseSequence": 17,
   "version": "3.3.0",
   "files": [
@@ -1346,8 +1346,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/candidate-generation.js",
-      "sha256": "5528afc13c0a536296ef5d78ce0b8ccaab15d9cf149960b74cc492d0da7db998",
-      "size": 43824
+      "sha256": "dbdf9fe1173179ba54cd72ec98ef5db55ad0a16b02242cc51455f3e6161a07ef",
+      "size": 44056
     },
     {
       "path": "tavern-plugin/lib/domain/candidate-guidance.js",
@@ -2836,8 +2836,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/polish-agent.js",
-      "sha256": "7cddcec0044f9427cf854d0c8c97b0bb9fe8599b6bdfad7b9f3fe0694a0ec01b",
-      "size": 10981
+      "sha256": "7339b115b323e018d1bda7885aaac44f795078aab28d35666f3c8115b7b29097",
+      "size": 13341
     },
     {
       "path": "tavern-plugin/lib/domain/polish-records.js",
@@ -3046,8 +3046,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/rollback-surface.js",
-      "sha256": "439949501f05c29ab0a2279934f14abfc8e57dbbfb5f667cd8c51eadd5c773f5",
-      "size": 71278
+      "sha256": "545625c95f80dd66c5944624fcc4d211be7f053a328e96d3ffb42cca332e719e",
+      "size": 78749
     },
     {
       "path": "tavern-plugin/lib/domain/round-anchor.js",
@@ -3061,8 +3061,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/round-history.js",
-      "sha256": "ce1360b46a0a2de9a87727ee0f15927db04d290e2eccf09f42b90d39a8e56ae9",
-      "size": 126066
+      "sha256": "ba3a89edaffd07613dcc9367c93d6b2981b1974fe21982df1f7b746722bb0538",
+      "size": 127912
     },
     {
       "path": "tavern-plugin/lib/domain/runtime-content-projection.js",
@@ -3501,8 +3501,8 @@
     },
     {
       "path": "tavern-plugin/lib/domain/story-timeline.js",
-      "sha256": "6f63b3f23a4f8a2cf6db6c204936ae392c0cb95c4da6f3d5dbdd02df9eec1fcd",
-      "size": 44195
+      "sha256": "7de5dc4dbf16a66eb183b0a085abb5ecc2ba203b98a9f9d23fa87b71634d6e8d",
+      "size": 49648
     },
     {
       "path": "tavern-plugin/lib/domain/story-tool-calls.js",
@@ -4181,8 +4181,8 @@
     },
     {
       "path": "tavern-plugin/lib/index.js",
-      "sha256": "19f7131da9a2f3560a25aa0acf222b39bea950eed3639d7f705640fbf34a049d",
-      "size": 330362
+      "sha256": "8e897aa625d8fa55aa2af703178e06b2ad8eed67fda442202cceb9fee18b8e9e",
+      "size": 330269
     },
     {
       "path": "tavern-plugin/lib/metadata-backup.js",
@@ -9751,9 +9751,9 @@
     }
   ],
   "archive": {
-    "commit": "d8e0955f00ab0bdc566cf4dca0799ab291468815",
+    "commit": "975eda242f3248bf605b0b58b04f46bf49a1c17f",
     "path": "runtime.zip",
-    "sha256": "a9eb0c9a598faecf4ec99685756719c7d63c73b49843a3e2a659510791fe42f9",
-    "size": 17082172
+    "sha256": "4bf6a4131578071ff72ba0dd45501f7e8460d2df56c937071813b612bcfb7ee6",
+    "size": 17085605
   }
 }

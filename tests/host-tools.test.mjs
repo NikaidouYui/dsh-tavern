@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createHostToolPolicy, presentNativeTools } from '../tavern-plugin/lib/host/tools.js'
-import { createBackgroundNativeRuntime } from './fixtures/background-native-runtime.mjs'
+import { createHostToolPolicy, presentNativeTools, resolveNativeExecutorEntry } from '../tavern-plugin/lib/host/tools.js'
 
 // Model the host waterfall, including redispatch and unrelated scoped policies.
 function host() {
@@ -53,6 +52,7 @@ for (const version of ['0.2.1', '0.2.2']) test(`${version}: policies compose for
 })
 
 test('real resident background Agent refreshes worldbook and networking declarations between tasks', { skip: !process.env.DSH_BOOT_MODULE }, async t => {
+  const { createBackgroundNativeRuntime } = await import('./fixtures/background-native-runtime.mjs')
   const h = await createBackgroundNativeRuntime(process.env.DSH_BOOT_MODULE, {
     residentOptions: { resolveWorldbookSkills: input => input.worldbookSkillsEnabled }
   })
@@ -77,4 +77,28 @@ test('native presentation is selected through presentAs on 0.2.1 and left to the
   presentNativeTools({ tools: { presentAs: mode => modes.push(mode) } })
   assert.deepEqual(modes, ['native'])
   assert.doesNotThrow(() => presentNativeTools({ tools: {} }))
+})
+
+test('resolveNativeExecutorEntry 在宿主入口为软链接时自动回退到真实路径解析原生执行器', () => {
+  const attempts = []
+  const resolved = resolveNativeExecutorEntry('/usr/local/bin/dsh', {
+    resolveRealPath: () => '/opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    resolvePackage: (entry, id) => {
+      attempts.push([entry, id])
+      if (entry === '/usr/local/bin/dsh') {
+        throw Object.assign(new Error('Cannot find module'), { code: 'MODULE_NOT_FOUND' })
+      }
+      return '/opt/dsh/node_modules/@deepseek-ai/dsh-tool-executor-native/lib/index.js'
+    },
+  })
+  assert.equal(resolved, '/opt/dsh/node_modules/@deepseek-ai/dsh-tool-executor-native/lib/index.js')
+  assert.deepEqual(attempts, [
+    ['/usr/local/bin/dsh', '@deepseek-ai/dsh-tool-executor-native'],
+    ['/opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js', '@deepseek-ai/dsh-tool-executor-native'],
+  ])
+  assert.throws(() => resolveNativeExecutorEntry(''), /无法定位当前 DSH 宿主入口/)
+  assert.throws(() => resolveNativeExecutorEntry('/missing/bin.js', {
+    resolveRealPath: () => '/missing/bin.js',
+    resolvePackage: () => { throw new Error('not installed') },
+  }), /not installed/)
 })

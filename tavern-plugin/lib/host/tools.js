@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 
@@ -50,6 +51,28 @@ export function createHostToolPolicy(ctx, { denial } = {}) {
   return Object.freeze({ assemble })
 }
 
+// 通过宿主入口及其真实路径候选解析原生工具执行器，兼容经由符号链接启动的原生 DSH CLI。
+export function resolveNativeExecutorEntry(hostEntry, {
+  resolveRealPath = realpathSync,
+  resolvePackage = (entry, id) => createRequire(entry).resolve(id),
+} = {}) {
+  if (!hostEntry) throw new Error('无法定位当前 DSH 宿主入口，不能选择原生工具执行器')
+  const candidates = [hostEntry]
+  try {
+    const realEntry = resolveRealPath(hostEntry)
+    if (realEntry && !candidates.includes(realEntry)) candidates.push(realEntry)
+  } catch {}
+  let lastError
+  for (const candidate of candidates) {
+    try {
+      return resolvePackage(candidate, '@deepseek-ai/dsh-tool-executor-native')
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError
+}
+
 // Tavern's contracts use direct tool calls. Select native execution in the
 // Agent's own scope, leaving the deployment and other Agents untouched.
 export async function useNativeTools(agentCtx) {
@@ -57,9 +80,7 @@ export async function useNativeTools(agentCtx) {
   // Resolve from the running Host entry, not Tavern's linked package directory.
   // The latter neither owns nor installs a second copy of this runtime package.
   const hostEntry = process.env.DSH_BOOT_MODULE || process.argv[1]
-  if (!hostEntry) throw new Error('无法定位当前 DSH 宿主入口，不能选择原生工具执行器')
-  const hostRequire = createRequire(hostEntry)
-  const entry = hostRequire.resolve('@deepseek-ai/dsh-tool-executor-native')
+  const entry = resolveNativeExecutorEntry(hostEntry)
   const { NativeToolExecutor } = await import(pathToFileURL(entry).href)
   agentCtx.tools.setExecutor(new NativeToolExecutor(agentCtx))
 }

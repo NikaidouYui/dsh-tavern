@@ -20,15 +20,24 @@ DSH Tavern 输入转义与防路由插件（参考 `st-4a-guard` 设计并原生
 - **思考等级与参数兼容**：支持保持原样、正文锁 `low` 或指定 `reasoningEffort`，并在 Gemini 4H/4C 下自动清理冲突采样参数。
 - **可选权重稀释垫片**：默认关闭，按需启用 `<inert_lexical_entropy_buffer>` 隔离静物参考垫片。
 
-## 安装
+## 安装与更新
 
-### 方式一：通过插件目录安装（本地开发 / 手动安装）
+### 方式一：通过 Git 地址一键安装与更新（推荐）
+打开 **设置 → DSH Tavern → 插件**，粘贴下方 GitHub 分支地址并点击 **「安装」**：
+
+```text
+https://github.com/NikaidouYui/dsh-tavern/tree/plugin-input-escape
+```
+
+后续仓库有新提交并由 GitHub Actions 自动打包发布后，只需在插件列表点 **「更新」** 即可拉取最新版本（支持 GitHub 直连与 jsDelivr CDN 自动回退），更新后重启 DSH 并刷新页面生效。
+
+### 方式二：打包 ZIP 上传安装
+可从 GitHub Releases 的 `tavern-plugins-current` 下载 `dsh-tavern-input-escape.zip`（或将本目录打包为 ZIP），在 **设置 → DSH Tavern → 插件 → 上传 ZIP** 中上传并重启 DSH。
+
+### 方式三：通过插件目录安装（本地开发 / 手动安装）
 将本插件文件夹复制到 Tavern 数据目录的 `plugins/` 下：
 
 - 默认目录：`~/.dsh/profile-data/tavern/data/plugins/dsh-tavern-input-escape/`
 - 若设置了 `DSH_HOME`：`$DSH_HOME/profile-data/tavern/data/plugins/dsh-tavern-input-escape/`
 
 复制后重启 DSH，在 **设置 → DSH Tavern → 插件** 中确认状态为「已加载」。
-
-### 方式二：打包 ZIP 上传安装
-将本目录打包为 ZIP 后，在 **设置 → DSH Tavern → 插件 → 上传 ZIP** 中上传并重启 DSH。

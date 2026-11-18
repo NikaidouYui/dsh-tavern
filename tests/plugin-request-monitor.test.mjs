@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
 
@@ -8,6 +10,8 @@ import { createTavernPluginApi } from '../tavern-plugin/lib/plugin-api.js'
 import { registerModelStreamHooks } from '../tavern-plugin/lib/hooks/model-stream.js'
 import { createModelRequestLog } from '../tavern-plugin/lib/domain/model-request-log.js'
 import { installToolProtocolFetchPatch } from '../tavern-plugin/lib/domain/tool-protocol-enforcement.js'
+import { parseGithubSource } from '../tavern-plugin/lib/domain/user-plugin-install.js'
+import { stageTavernPlugin, TAVERN_PLUGIN_TARGETS } from '../.github/scripts/stage-tavern-plugin.mjs'
 import { buildRequestMonitorClient } from '../tavern-plugin/packages/dsh-tavern-request-monitor/build.mjs'
 import {
   apply as applyInputEscape,
@@ -664,4 +668,27 @@ test('响应体解析器（SSE/JSON）与 HTTP 200 流式旁路捕获及 Abort �
     await new Promise(resolve => server.close(resolve))
   }
 })
+
+test('Action 发布脚本可将自研插件打包为兼容 GitHub 分支安装的纯净目录', async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), 'rm-stage-'))
+  try {
+    for (const target of TAVERN_PLUGIN_TARGETS) {
+      const ghSource = parseGithubSource(`https://github.com/NikaidouYui/dsh-tavern/tree/${target.branch}`)
+      assert.equal(ghSource.owner, 'NikaidouYui')
+      assert.equal(ghSource.repo, 'dsh-tavern')
+      assert.equal(ghSource.ref, target.branch)
+
+      const dest = path.join(tmpRoot, target.name)
+      const staged = await stageTavernPlugin(target, dest)
+      assert.equal(staged.name, target.name)
+      assert.ok(staged.files.includes('package.json'))
+      assert.ok(staged.files.includes('lib/index.js'))
+      assert.ok(staged.files.includes('client.js'))
+      assert.ok(!staged.files.some(f => f.startsWith('src/') || f === 'build.mjs'))
+    }
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true })
+  }
+})
+
 

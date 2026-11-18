@@ -13,15 +13,24 @@ DSH Tavern 真实外发请求监控插件：从 Node 底层 HTTP Wire（`undici`
   - **参数、HTTP 与导出**：查看模型采样参数、工具 Schema、已脱敏的请求头 / 响应头与错误正文；支持一键复制 Markdown 报告、美化 JSON 或脱敏 cURL。
 - **安全与内存边界**：自动脱敏 `Authorization`、`x-api-key`、`Cookie` 与 URL Query Key；内存采用条数与总字节双重有界环形缓冲区。
 
-## 安装
+## 安装与更新
 
-### 方式一：本地目录安装
+### 方式一：通过 Git 地址一键安装与更新（推荐）
+打开 **设置 → DSH Tavern → 插件**，粘贴下方 GitHub 分支地址并点击 **「安装」**：
+
+```text
+https://github.com/NikaidouYui/dsh-tavern/tree/plugin-request-monitor
+```
+
+后续仓库有新提交并由 GitHub Actions 自动打包发布后，只需在插件列表点 **「更新」** 即可拉取最新版本（支持 GitHub 直连与 jsDelivr CDN 自动回退），更新后重启 DSH 并刷新页面生效。
+
+### 方式二：打包 ZIP 上传安装
+可从 GitHub Releases 的 `tavern-plugins-current` 下载 `dsh-tavern-request-monitor.zip`（或将本目录打包为 ZIP），在 **设置 → DSH Tavern → 插件 → 上传 ZIP** 中上传并重启 DSH。
+
+### 方式三：本地目录安装
 将本目录复制到 Tavern 数据目录的 `plugins/` 下：
 
 - 默认目录：`~/.dsh/profile-data/tavern/data/plugins/dsh-tavern-request-monitor/`
 - 若设置了 `DSH_HOME`：`$DSH_HOME/profile-data/tavern/data/plugins/dsh-tavern-request-monitor/`
 
 复制后重启 DSH 并刷新页面，在 **设置 → DSH Tavern → 插件** 中确认状态为「已加载」。
-
-### 方式二：打包 ZIP 上传安装
-将本目录打包为 ZIP 后，在 **设置 → DSH Tavern → 插件 → 上传 ZIP** 中上传并重启 DSH。

@@ -1,0 +1,151 @@
+name: Publish Tavern plugins
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tavern-plugin/packages/dsh-tavern-request-monitor/**'
+      - 'tavern-plugin/packages/dsh-tavern-input-escape/**'
+      - '.github/scripts/stage-tavern-plugin.mjs'
+      - '.github/workflows/publish-tavern-plugins.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-tavern-plugins-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish-plugins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Run plugin unit checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tavern-plugin/packages/dsh-tavern-request-monitor/build.mjs --check
+          node tavern-plugin/packages/dsh-tavern-input-escape/build.mjs --check
+
+      - name: Stage plugin branches & build ZIP archives
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          head_sha=$(git rev-parse HEAD)
+          zips_dir="$RUNNER_TEMP/plugin-zips"
+          mkdir -p "$zips_dir"
+          summary_file="$RUNNER_TEMP/plugins-summary.md"
+          : > "$summary_file"
+
+          targets_json=$(node .github/scripts/stage-tavern-plugin.mjs --list-json)
+          count=$(node -e "console.log(JSON.parse(process.argv[1]).length)" "$targets_json")
+
+          for ((i=0; i<count; i++)); do
+            name=$(node -e "console.log(JSON.parse(process.argv[1])[$i].name)" "$targets_json")
+            branch=$(node -e "console.log(JSON.parse(process.argv[1])[$i].branch)" "$targets_json")
+            zip_name=$(node -e "console.log(JSON.parse(process.argv[1])[$i].zipName)" "$targets_json")
+            stage_dir="$RUNNER_TEMP/stage/$name"
+
+            meta=$(node .github/scripts/stage-tavern-plugin.mjs --plugin "$name" --dest "$stage_dir")
+            version=$(node -e "console.log(JSON.parse(process.argv[1]).version)" "$meta")
+            bytes=$(node -e "console.log(JSON.parse(process.argv[1]).totalBytes)" "$meta")
+
+            # 生成可直接通过「上传 ZIP」安装的纯插件压缩包（根目录即为 package.json）
+            zip_path="$zips_dir/$zip_name"
+            rm -f "$zip_path"
+            (
+              cd "$stage_dir"
+              zip -X -9 -q -r "$zip_path" .
+            )
+            node .github/scripts/check-runtime-archive.mjs "$zip_path"
+
+            # 发布到独立孤儿分发分支，支持酒馆粘贴 https://github.com/<repo>/tree/<branch> 安装与更新
+            wt_dir="$RUNNER_TEMP/wt-$name"
+            rm -rf "$wt_dir"
+            git worktree add --detach "$wt_dir"
+            (
+              cd "$wt_dir"
+              git checkout -q --orphan "$branch"
+              git rm -rfq .
+              cp -a "$stage_dir"/. .
+              git add -A
+              new_tree=$(git write-tree)
+              remote_tree=$(git ls-remote --heads origin "$branch" | awk '{print $1}')
+              remote_tree_id=""
+              if [[ -n "$remote_tree" ]]; then
+                git fetch -q origin "$branch" --depth=1 || true
+                remote_tree_id=$(git rev-parse FETCH_HEAD^{tree} 2>/dev/null || true)
+              fi
+              if [[ -n "$remote_tree_id" && "$remote_tree_id" == "$new_tree" ]]; then
+                echo "$name ($branch) 分支内容无变化，跳过推送。"
+              else
+                git commit -qm "chore(plugin): publish $name $version ($head_sha)"
+                git push -q --force origin "HEAD:refs/heads/$branch"
+                echo "已推送 $name v$version 到分支 $branch"
+              fi
+            )
+            git worktree remove --force "$wt_dir"
+
+            # Best-effort 刷新 jsDelivr 缓存（国内备用直连线路）
+            for f in package.json lib/index.js client.js; do
+              curl -fsSL "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@${branch}/${f}" >/dev/null || true
+            done
+
+            {
+              echo "- **${name}** (\`v${version}\`, ${bytes} bytes)"
+              echo "  - 酒馆 Git 安装/更新地址：\`https://github.com/${GITHUB_REPOSITORY}/tree/${branch}\`"
+              echo "  - 离线 ZIP 下载：\`https://github.com/${GITHUB_REPOSITORY}/releases/download/tavern-plugins-current/${zip_name}\`"
+            } >> "$summary_file"
+          done
+
+      - name: Publish GitHub Release (tavern-plugins-current)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head_sha=$(git rev-parse HEAD)
+          tag="tavern-plugins-current"
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes_file" <<EOF
+          DSH Tavern 扩展插件独立分发包（随 \`main\` 自动打包，提交 \`${head_sha}\`）。
+
+          ### 在酒馆中通过 Git 地址一键安装与更新
+          打开 **设置 → DSH Tavern → 插件**，粘贴对应插件的分支地址即可安装；后续有新版本时点击插件右侧 **「更新」** 即可拉取最新代码：
+
+          $(cat "$RUNNER_TEMP/plugins-summary.md")
+          EOF
+
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" "$RUNNER_TEMP"/plugin-zips/*.zip \
+              --target "$head_sha" --latest=false \
+              --title "DSH Tavern Plugins (Current)" \
+              --notes-file "$notes_file"
+          else
+            git tag -f "$tag" "$head_sha"
+            git push -f origin "refs/tags/$tag"
+            gh release edit "$tag" --notes-file "$notes_file"
+            gh release upload "$tag" "$RUNNER_TEMP"/plugin-zips/*.zip --clobber
+          fi
+
+      - name: Write workflow summary
+        shell: bash
+        run: |
+          {
+            echo "## 酒馆插件打包发布完成"
+            echo ""
+            cat "$RUNNER_TEMP/plugins-summary.md"
+          } >> "$GITHUB_STEP_SUMMARY"

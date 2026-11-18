@@ -1,0 +1,40 @@
+{
+  "name": "dsh-tavern-request-monitor",
+  "version": "1.0.0",
+  "description": "DSH Tavern 真实外发请求监控插件：从底层 HTTP Wire 与 Tavern 请求流捕获每次真实发送的 LLM 请求，提供对话分段阅读、Wire \\uXXXX 与 ⟦U:...⟧ 解码对照、图片预览、参数/工具检查与脱敏 cURL/Markdown 导出。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "client.js",
+    "build.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "dsh-tavern-plugin"
+      ]
+    },
+    "compatibility": {
+      "tavernApiVersion": 8
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:check": "node build.mjs --check"
+  },
+  "license": "MIT"
+}

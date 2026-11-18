@@ -1,0 +1,6 @@
+plugins:
+  - group: true
+    entries:
+    - id: dsh-tavern-request-monitor
+      name: dsh-tavern-request-monitor
+      config: {}

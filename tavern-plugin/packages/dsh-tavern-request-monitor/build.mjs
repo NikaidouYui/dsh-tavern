@@ -34,7 +34,7 @@ function wrapSource(bodies) {
     '      return module.exports',
     '    }',
     '    const h = React.createElement',
-    '    const { Fragment, useEffect, useState } = React',
+    '    const { Fragment, useEffect, useRef, useState } = React',
     '',
   ].join('\n')
 

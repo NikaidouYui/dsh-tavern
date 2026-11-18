@@ -512,6 +512,12 @@ test('与 dsh-tavern 插件 API 及 dsh-tavern-input-escape 全链路协作：�
     assert.equal(detailRes.found, true)
     assert.ok(detailRes.record.parsed.stats.sessionFingerprint.startsWith('SID_'))
 
+    const partialRes = await api.callHandler('dsh-tavern-request-monitor/get-detail', { id: item.id, includeRequestBody: false })
+    assert.equal(partialRes.found, true)
+    assert.equal(partialRes.partialResponseOnly, true)
+    assert.equal(partialRes.record.rawBodyText, undefined)
+    assert.equal(partialRes.record.parsed, undefined)
+
     const mdRes = await api.callHandler('dsh-tavern-request-monitor/export-record', { id: item.id, format: 'markdown' })
     assert.ok(mdRes.content.includes('deepseek-chat'))
   } finally {
@@ -545,6 +551,7 @@ test('浏览器侧 client.js 可正常被 __ModuleLoader__ 加载并注册面板
               Fragment: Symbol('Fragment'),
               createElement: (type, props, ...children) => ({ type, props, children }),
               useEffect: () => {},
+              useRef: init => ({ current: init }),
               useState: init => [typeof init === 'function' ? init() : init, () => {}],
             }
           })

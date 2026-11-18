@@ -556,7 +556,7 @@ export function createRequestMonitorEngine({
               truncated = true
             }
             const now = Date.now()
-            if (now - lastSyncAt >= 350) {
+            if (now - lastSyncAt >= 800) {
               lastSyncAt = now
               const rec = records.get(targetId)
               if (rec && rec.state === 'pending') {

@@ -134,6 +134,30 @@ export function apply(ctx, options = {}) {
       await ensureConfigLoaded()
       const detail = engine.getDetail(args.id)
       if (!detail) return { found: false, record: null }
+      if (args.includeRequestBody === false) {
+        return {
+          found: true,
+          config,
+          partialResponseOnly: true,
+          record: {
+            id: detail.id,
+            seq: detail.seq,
+            updatedAt: detail.updatedAt,
+            state: detail.state,
+            statusCode: detail.statusCode,
+            ttfbMs: detail.ttfbMs,
+            durationMs: detail.durationMs,
+            error: detail.error,
+            abortReason: detail.abortReason,
+            errorResponseText: detail.errorResponseText,
+            responseHeaders: detail.responseHeaders,
+            responseRawText: detail.responseRawText,
+            responseBytes: detail.responseBytes,
+            responseTruncated: detail.responseTruncated,
+            parsedResponse: detail.parsedResponse,
+          },
+        }
+      }
       if (args.includeRawWire === false) {
         detail.rawBodyText = ''
       }

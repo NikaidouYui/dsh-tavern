@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
       return module.exports
     }
     const h = React.createElement
-    const { Fragment, useEffect, useState } = React
+    const { Fragment, useEffect, useRef, useState } = React
 /* ===== src/client/styles.js ===== */
 const RM_STYLE_ID = 'dsh-tavern-request-monitor-styles'
 
@@ -1147,7 +1147,13 @@ function useRequestMonitorFeed(ui, gameId, { autoPoll = false } = {}) {
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState('')
 
-  const refreshList = async () => {
+  const lastSnapshotRef = useRef({ version: -1, filterKey: '' })
+  const detailRef = useRef(null)
+  detailRef.current = detail
+
+  const filterKey = `${gameId || ''}|${viewMode}|${scopeFilter}|${onlyErrors ? '1' : '0'}|${query}`
+
+  const refreshList = async ({ force = false } = {}) => {
     try {
       const res = await ui.callHost(`${RM_PLUGIN_ID}/get-state`, {
         currentGameId: gameId || '',
@@ -1156,18 +1162,22 @@ function useRequestMonitorFeed(ui, gameId, { autoPoll = false } = {}) {
         onlyErrors,
         query,
       })
-      if (res) {
-        setFeed(res)
-        setError('')
-        if (Array.isArray(res.requests) && res.requests.length > 0) {
-          setSelectedId(prev => {
-            if (prev && res.requests.some(item => item.id === prev)) return prev
-            return res.requests[0].id
-          })
-        } else {
-          setSelectedId('')
-          setDetail(null)
-        }
+      if (!res) return
+      const prevSnap = lastSnapshotRef.current
+      if (!force && prevSnap.filterKey === filterKey && prevSnap.version === res.version) {
+        return
+      }
+      lastSnapshotRef.current = { version: res.version, filterKey }
+      setFeed(res)
+      setError('')
+      if (Array.isArray(res.requests) && res.requests.length > 0) {
+        setSelectedId(prev => {
+          if (prev && res.requests.some(item => item.id === prev)) return prev
+          return res.requests[0].id
+        })
+      } else {
+        setSelectedId('')
+        setDetail(null)
       }
     } catch (err) {
       setError(String(err?.message || err))
@@ -1175,7 +1185,7 @@ function useRequestMonitorFeed(ui, gameId, { autoPoll = false } = {}) {
   }
 
   useEffect(() => {
-    void refreshList()
+    void refreshList({ force: true })
   }, [gameId, viewMode, scopeFilter, onlyErrors, query])
 
   useEffect(() => {
@@ -1186,8 +1196,9 @@ function useRequestMonitorFeed(ui, gameId, { autoPoll = false } = {}) {
       })
     }
     let timer = null
-    if (autoPoll || !gameId) {
-      timer = setInterval(() => { void refreshList() }, 2000)
+    // 有 gameId 时已由 watchState 实时推送，不再同时高频轮询；仅在无 watchState 或无 gameId 时启用低频轮询
+    if (!gameId || (autoPoll && typeof ui.watchState !== 'function')) {
+      timer = setInterval(() => { void refreshList() }, 2500)
     }
     return () => {
       if (typeof stopWatch === 'function') stopWatch()
@@ -1195,24 +1206,47 @@ function useRequestMonitorFeed(ui, gameId, { autoPoll = false } = {}) {
     }
   }, [gameId, viewMode, scopeFilter, onlyErrors, query, autoPoll])
 
+  const selectedSummary = (feed.requests || []).find(item => item.id === selectedId) || null
+  const selectedUpdatedAt = selectedSummary ? selectedSummary.updatedAt : 0
+
   useEffect(() => {
     if (!selectedId) {
       setDetail(null)
+      setDetailLoading(false)
       return
     }
+    const currentDetail = detailRef.current
+    const isSameRecord = Boolean(currentDetail && currentDetail.id === selectedId)
+    if (isSameRecord && selectedUpdatedAt && currentDetail.updatedAt === selectedUpdatedAt) {
+      return
+    }
+
     let alive = true
-    setDetailLoading(true)
-    ui.callHost(`${RM_PLUGIN_ID}/get-detail`, { id: selectedId, includeRawWire: true })
+    // 仅在切换查看不同请求时显示加载提示；同一请求流式更新时保持现有视图就地静默刷新，避免界面闪烁
+    if (!isSameRecord) {
+      setDetailLoading(true)
+    }
+    ui.callHost(`${RM_PLUGIN_ID}/get-detail`, {
+      id: selectedId,
+      includeRawWire: true,
+      includeRequestBody: !isSameRecord,
+    })
       .then(res => {
         if (!alive) return
-        setDetail(res?.found ? res.record : null)
+        if (!res?.found) {
+          setDetail(null)
+        } else if (res.partialResponseOnly) {
+          setDetail(prev => (prev && prev.id === selectedId ? { ...prev, ...res.record } : prev))
+        } else {
+          setDetail(res.record)
+        }
         setDetailLoading(false)
       })
       .catch(() => {
         if (alive) setDetailLoading(false)
       })
     return () => { alive = false }
-  }, [selectedId, feed.version])
+  }, [selectedId, selectedUpdatedAt])
 
   const saveConfig = async patch => {
     try {
@@ -1334,7 +1368,7 @@ function RequestMonitorFilterBar({ state, gameId, showSettings, setShowSettings 
         h('button', {
           type: 'button',
           className: 'rm-btn',
-          onClick: () => state.refreshList(),
+          onClick: () => state.refreshList({ force: true }),
         }, '刷新'),
         h('button', {
           type: 'button',

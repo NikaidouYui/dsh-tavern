@@ -123,3 +123,60 @@ test('RPC 只在两步精修都完成后保存一次，失败不写入半成品�
     }
   }
 })
+
+test('精修失败后重试回退到最近一次已完成边界，不重复追加失败正文；首次失败回退至 -1', async () => {
+  const f = fixture()
+  let nextBoundary = 10
+  let rewindFailedOnce = false
+  let failMode = false
+  f.options.runAgent = async input => {
+    const id = input.newSession ? 'child-1' : input.persistentSessionId
+    await input.onPersistentSessionReady(id)
+    f.calls.push({ ...input, text: input.taskText(), id })
+    if (failMode) {
+      if (failMode === 'rewind-failed' && !rewindFailedOnce && input.rewindTo !== -1) {
+        rewindFailedOnce = true
+        throw Object.assign(new Error('回退边界缺失'), { code: 'BACKGROUND_REWIND_FAILED' })
+      }
+      if (failMode !== 'rewind-failed') throw new Error('模型失败')
+    }
+    if (f.calls.length === 2) input.onToolCall({ name: 'polish_edit', arguments: { find: '甲。', replace: '甲改。', reason: '套话' } })
+    input.onToolCall({ name: 'polish_finish', arguments: {} })
+    nextBoundary += 10
+    return { traceSessionId: id, traceBoundary: nextBoundary }
+  }
+  const reviewer = createPolishReviewer(f.options)
+  // 1) 首次即失败，再试时传入 rewindTo: -1 且不误加 <story_changed>
+  failMode = true
+  await assert.rejects(reviewer.review('parent', ['甲。乙。']), /模型失败/)
+  failMode = false
+  await reviewer.review('parent', ['甲。乙。'])
+  assert.equal(f.calls[0].rewindTo, undefined)
+  assert.equal(f.calls[1].rewindTo, -1)
+  assert.equal(f.calls[1].rewindFormatVersion, 4)
+  assert.doesNotMatch(f.calls[1].text, /<story_changed>/)
+
+  // 2) 进入下一轮：先连败两次，再成功；每次重试都精准回退到上一轮完成的边界 20，且保持线性前文语境
+  f.chat.messages[2].text = '甲改。乙。'
+  f.chat.messages.push({ role: 'user', text: '继续二轮' }, { role: 'assistant', text: '丙。丁。' })
+  failMode = true
+  await assert.rejects(reviewer.review('parent', ['丙。丁。']), /模型失败/)
+  await assert.rejects(reviewer.review('parent', ['丙。丁。']), /模型失败/)
+  failMode = false
+  await reviewer.review('parent', ['丙。丁。'])
+  assert.equal(f.calls[2].rewindTo, undefined)
+  assert.equal(f.calls[3].rewindTo, 20)
+  assert.equal(f.calls[4].rewindTo, 20)
+  assert.match(f.calls[3].text, /^上一轮实际采用此前的精修草稿。/)
+  assert.match(f.calls[4].text, /^上一轮实际采用此前的精修草稿。/)
+  assert.doesNotMatch(f.calls[4].text, /<story_changed>/)
+
+  // 3) 若回退既有边界触发 BACKGROUND_REWIND_FAILED，自动降级为 rewindTo: -1 重建一次
+  f.chat.messages.push({ role: 'user', text: '继续三轮' }, { role: 'assistant', text: '戊。己。' })
+  failMode = true
+  await assert.rejects(reviewer.review('parent', ['戊。己。']), /模型失败/)
+  failMode = 'rewind-failed'
+  await reviewer.review('parent', ['戊。己。'])
+  assert.equal(f.calls[6].rewindTo, 30)
+  assert.equal(f.calls[7].rewindTo, -1)
+})

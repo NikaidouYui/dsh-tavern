@@ -64,53 +64,116 @@ export function createPolishReviewer({ latestFloors, readCard, prompt, runAgent,
     const prefix = hash(system)
     const saved = await data.readGame({ chatId: chat.id, owner: OWNER })
     // One 润色 Session per game (and per prompt prefix): it continues through regeneration,
-    // rollback and failed or cut-short reviews. When the story did not simply move on from the
-    // last finished review, the task says so and gives the current previous floor.
+    // rollback and completed reviews. Failed or incomplete attempts rewind back to the last
+    // completed boundary so retries never stack duplicate draft prompts onto the session.
     const previous = saved?.version === 1 && saved.parent === sessionId && saved.prefix === prefix && saved.traceSessionId ? saved : null
-    const known = value => previous && [previous.original, previous.draft].includes(hash(value))
-    const linear = Boolean(previous?.complete) && (floor === previous.floor ? known(body) : floor === previous.floor + 2 && known(context.previous))
+    const previousCompleted = previous
+      ? (previous.complete
+        ? {
+            floor: previous.floor,
+            original: previous.original,
+            draft: previous.draft,
+            ...(Number.isSafeInteger(previous.boundary) ? { boundary: previous.boundary, formatVersion: previous.formatVersion || 4 } : {})
+          }
+        : previous.lastCompleted && typeof previous.lastCompleted === 'object'
+          ? previous.lastCompleted
+          : null)
+      : null
+    const rewindBoundary = previous && !previous.complete
+      ? (Number.isSafeInteger(previousCompleted?.boundary) ? previousCompleted.boundary : -1)
+      : undefined
     const reusable = Boolean(previous)
     let continued = false
-    const state = { version: 1, parent: sessionId, prefix, floor, complete: false, original: hash(body), traceSessionId: previous?.traceSessionId || '' }
+    const activeBase = () => (continued ? previousCompleted : null)
+    const known = (base, value) => Boolean(base && [base.original, base.draft].includes(hash(value)))
+    const isLinear = base => Boolean(base) && (floor === base.floor ? known(base, body) : floor === base.floor + 2 && known(base, context.previous))
+    const state = {
+      version: 1,
+      parent: sessionId,
+      prefix,
+      floor,
+      complete: false,
+      original: hash(body),
+      traceSessionId: previous?.traceSessionId || '',
+      ...(previousCompleted ? { lastCompleted: structuredClone(previousCompleted) } : {})
+    }
     const status = { phase: 'running', edits: [], startedAt: Date.now(), traceSessionId: '' }
     progress.set(sessionId, status)
     const draft = createPolishDraft(texts, edits => { status.edits = edits.map(edit => ({ ...edit })) })
     try {
       await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
-      const result = await runAgent({
-        task: 'polish', sessionId, persistent: true, persistentSessionId: reusable ? previous.traceSessionId : '', newSession: !reusable,
-        selection: await selection(sessionId), signal, system, webSearchEnabled: false,
-        tools: POLISH_TOOLS, maxToolCalls: 32, toolLimitMessage: '精修调用次数已达上限，请结束任务。',
-        onToolCall: call => draft.call(call), stopToolsWhen: () => draft.finished, acceptWithoutText: () => draft.finished,
-        async onPersistentSessionReady(id) {
-          continued = Boolean(reusable && id === previous.traceSessionId)
-          state.traceSessionId = id; status.traceSessionId = id
-          await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
-        },
-        taskText: () => {
-          const sections = []
-          if (continued && linear && floor === previous.floor) {
-            sections.push('仍是同一轮；以此前提交的' + (hash(body) === previous.original ? '原文' : '精修草稿') + '作为本次原文，重新开始一份独立草稿。')
-          } else if (continued && linear) {
-            sections.push('上一轮实际采用' + (hash(context.previous) === previous.original ? '此前输入的原文（未应用精修草稿）' : '此前的精修草稿') + '。')
-          } else {
-            if (continued) sections.push(promptSection('story_changed', '此前审过的内容可能已被回退、重写，或上次没有审完；以下面的前文和本轮正文为准。'))
-            if (context.previous) sections.push(promptSection('previous_body', context.previous.slice(-3000)))
+      const runSelection = await selection(sessionId)
+      const executeReview = async (rewindTo, rewindFormatVersion) => {
+        continued = false
+        return await runAgent({
+          task: 'polish', sessionId, persistent: true, persistentSessionId: reusable ? previous.traceSessionId : '', newSession: !reusable,
+          ...(rewindTo !== undefined ? { rewindTo, rewindFormatVersion: rewindFormatVersion || 4 } : {}),
+          selection: runSelection, signal, system, webSearchEnabled: false,
+          tools: POLISH_TOOLS, maxToolCalls: 32, toolLimitMessage: '精修调用次数已达上限，请结束任务。',
+          onToolCall: call => draft.call(call), stopToolsWhen: () => draft.finished, acceptWithoutText: () => draft.finished,
+          async onPersistentSessionReady(id) {
+            continued = Boolean(reusable && id === previous.traceSessionId)
+            if (!continued) delete state.lastCompleted
+            state.traceSessionId = id; status.traceSessionId = id
+            await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
+          },
+          taskText: () => {
+            const sections = []
+            const base = activeBase()
+            const linear = isLinear(base)
+            if (base && linear && floor === base.floor) {
+              sections.push('仍是同一轮；以此前提交的' + (hash(body) === base.original ? '原文' : '精修草稿') + '作为本次原文，重新开始一份独立草稿。')
+            } else if (base && linear) {
+              sections.push('上一轮实际采用' + (hash(context.previous) === base.original ? '此前输入的原文（未应用精修草稿）' : '此前的精修草稿') + '。')
+            } else {
+              if (base) sections.push(promptSection('story_changed', '此前审过的内容可能已被回退、重写，或上次没有审完；以下面的前文和本轮正文为准。'))
+              if (context.previous) sections.push(promptSection('previous_body', context.previous.slice(-3000)))
+            }
+            sections.push(promptSection('turn_reminder', (guidance ? '本轮只按玩家意见修改，不额外扩展原则精修。' : '按固定前缀中的完整精修原则审读本轮正文，只改明确的问题。') +
+              '保留剧情事实、力量等级、人物意图和有效信息；不要把正常比喻当作错误，不为改而改，不补造情节。每处修改调用 polish_edit；没有必要修改就直接调用 polish_finish。'))
+            // Always give the current target verbatim, including guided passes after compaction.
+            sections.push(promptSection('turn_body', body))
+            if (context.input) sections.push(promptSection('turn_input', context.input.slice(0, 2000)))
+            sections.push(promptSection('polish_task', guidance ? '只按意见修改：' + guidance.slice(0, 1000) : '原则精修'))
+            return sections.join('\n\n')
           }
-          sections.push(promptSection('turn_reminder', (guidance ? '本轮只按玩家意见修改，不额外扩展原则精修。' : '按固定前缀中的完整精修原则审读本轮正文，只改明确的问题。') +
-            '保留剧情事实、力量等级、人物意图和有效信息；不要把正常比喻当作错误，不为改而改，不补造情节。每处修改调用 polish_edit；没有必要修改就直接调用 polish_finish。'))
-          // Always give the current target verbatim, including guided passes after compaction.
-          sections.push(promptSection('turn_body', body))
-          if (context.input) sections.push(promptSection('turn_input', context.input.slice(0, 2000)))
-          sections.push(promptSection('polish_task', guidance ? '只按意见修改：' + guidance.slice(0, 1000) : '原则精修'))
-          return sections.join('\n\n')
+        })
+      }
+      let result
+      try {
+        result = await executeReview(rewindBoundary, previousCompleted?.formatVersion || 4)
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (error?.code === 'BACKGROUND_REWIND_FAILED' && rewindBoundary !== undefined && rewindBoundary !== -1) {
+          delete state.lastCompleted
+          await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
+          result = await executeReview(-1, 4)
+        } else {
+          throw error
         }
-      })
+      }
       signal?.throwIfAborted()
       if (!draft.finished) throw new Error('精修 Agent 未调用完成工具，草稿未保存，请重试')
       const reviewed = draft.result()
-      state.draft = hash(applyPolishEdits(texts, reviewed.edits).join('\n\n'))
-      state.complete = true; state.traceSessionId = result.traceSessionId
+      const appliedDraftHash = hash(applyPolishEdits(texts, reviewed.edits).join('\n\n'))
+      const boundary = Number.isSafeInteger(result?.traceBoundary) ? result.traceBoundary : null
+      const completedSnapshot = {
+        floor,
+        original: hash(body),
+        draft: appliedDraftHash,
+        ...(boundary !== null ? { boundary, formatVersion: 4 } : {})
+      }
+      state.draft = appliedDraftHash
+      state.complete = true
+      state.traceSessionId = result.traceSessionId
+      if (boundary !== null) {
+        state.boundary = boundary
+        state.formatVersion = 4
+      } else {
+        delete state.boundary
+        delete state.formatVersion
+      }
+      state.lastCompleted = completedSnapshot
       await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
       status.phase = 'completed'
       return reviewed

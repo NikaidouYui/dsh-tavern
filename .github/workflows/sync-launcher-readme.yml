@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   sync:
-    if: github.ref == 'refs/heads/main'
+    if: github.repository == 'flizzywine/dsh-tavern' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

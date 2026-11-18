@@ -2,7 +2,7 @@ name: Sync upstream and release
 
 on:
   schedule:
-    # 每 6 小时自动检查并同步上游更新
+    # 每 6 小时自动检查并同步上游更新（遇纯 manifest 提交自动跳过，有真实冲突则保留告警 PR/Issue）
     - cron: '0 */6 * * *'
   push:
     branches: [main]
@@ -10,10 +10,19 @@ on:
       - '.github/workflows/sync-upstream-and-release.yml'
       - '.github/scripts/sync-upstream.mjs'
       - '.github/scripts/rewrite-fork-repository.mjs'
+      - '.github/scripts/check-fork-gate.mjs'
   workflow_dispatch:
     inputs:
-      force_release:
-        description: 即使上游没有新提交，也强制重新打包并发布插件与运行归档
+      force_sync:
+        description: 即使上游仅更新了运行清单，也强制创建同步 PR
+        type: boolean
+        default: false
+      auto_merge:
+        description: 门禁校验全绿时自动合并同步 PR 并触发发布
+        type: boolean
+        default: true
+      force_launcher:
+        description: 即使启动器目录无改动，合并后也强制重打 launcher-current
         type: boolean
         default: false
       upstream_repo:
@@ -27,19 +36,20 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+  issues: write
 
 concurrency:
   group: sync-upstream-${{ github.event.repository.default_branch }}
   cancel-in-progress: false
 
 jobs:
-  sync:
+  sync-and-pr:
+    if: github.repository != 'flizzywine/dsh-tavern'
     runs-on: ubuntu-latest
     outputs:
-      should_release: ${{ steps.plan.outputs.should_release }}
-      merged: ${{ steps.sync.outputs.merged }}
-      committed: ${{ steps.sync.outputs.committed }}
-      head_sha: ${{ steps.sync.outputs.head_sha }}
+      status: ${{ steps.sync.outputs.status }}
+      merged_to_main: ${{ steps.pr.outputs.merged_to_main }}
       upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
       upstream_commits: ${{ steps.sync.outputs.upstream_commits }}
     steps:
@@ -48,344 +58,217 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.8.0
+
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '24'
+          cache: pnpm
 
-      - name: Sync upstream and rewrite repository references
+      - name: Sync upstream to staging branch & update upstream-main mirror
         id: sync
         shell: bash
         env:
           UPSTREAM_REPO: ${{ inputs.upstream_repo || 'flizzywine/dsh-tavern' }}
           UPSTREAM_BRANCH: ${{ inputs.upstream_branch || 'main' }}
           GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
+          FORCE_SYNC: ${{ inputs.force_sync == true }}
         run: |
           set -euo pipefail
-          node .github/scripts/sync-upstream.mjs
+          node .github/scripts/sync-upstream.mjs --report-conflict
 
-      - name: Determine whether release packaging is needed
-        id: plan
+      - name: Close stale conflict tracking issue when main catches up
+        if: steps.sync.outputs.status == 'up-to-date'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          COMMITTED: ${{ steps.sync.outputs.committed }}
-          FORCE_RELEASE: ${{ inputs.force_release || 'false' }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          issue_title="[Upstream Sync] 同步上游存在代码冲突"
+          issue_num=$(gh issue list --state open --search "$issue_title in:title" --json number,title \
+            --jq "map(select(.title == \"$issue_title\")) | .[0].number // empty" || true)
+          if [[ -n "$issue_num" ]]; then
+            gh issue close "$issue_num" --comment "上游最新提交 \`${UPSTREAM_SHA}\` 已同步至主分支，自动关闭本冲突提醒。"
+          fi
+
+      - name: Notify conflict tracking issue and abort
+        if: steps.sync.outputs.status == 'conflict'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo || 'flizzywine/dsh-tavern' }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch || 'main' }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+          SHORT_SHA: ${{ steps.sync.outputs.short_upstream_sha }}
+          CONFLICT_FILES: ${{ steps.sync.outputs.conflict_files }}
+          UPSTREAM_COMMITS: ${{ steps.sync.outputs.upstream_commits }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          should_release=false
-          reasons=()
-
-          if [[ "$FORCE_RELEASE" == "true" ]]; then
-            should_release=true
-            reasons+=("手动强制打包")
-          fi
-          if [[ "$COMMITTED" == "true" ]]; then
-            should_release=true
-            reasons+=("已同步上游更新或更新仓库指向")
-          fi
-          if ! gh release view launcher-current >/dev/null 2>&1; then
-            should_release=true
-            reasons+=("缺少 launcher-current Release")
-          fi
-          if ! git ls-remote --exit-code --heads origin "runtime-archive-${DEFAULT_BRANCH}" >/dev/null 2>&1; then
-            should_release=true
-            reasons+=("缺少 runtime-archive-${DEFAULT_BRANCH} 分支")
-          fi
-          if ! git ls-remote --exit-code --heads origin launcher-cdn-current >/dev/null 2>&1; then
-            should_release=true
-            reasons+=("缺少 launcher-cdn-current 分支")
-          fi
-
-          printf 'should_release=%s\n' "$should_release" >> "$GITHUB_OUTPUT"
-          if [[ "$should_release" == "true" ]]; then
-            echo "触发发布打包，原因：${reasons[*]}"
-          else
-            echo "上游无新提交且所有发布产物已存在，跳过本次打包。"
-          fi
-
-  publish-runtime:
-    needs: sync
-    if: needs.sync.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    concurrency:
-      group: publish-runtime-manifest-${{ github.event.repository.default_branch }}
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-
-      - name: Build immutable runtime manifest
-        shell: bash
-        env:
-          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          git fetch origin "$TARGET_BRANCH"
-          git checkout "$TARGET_BRANCH"
-          git pull --ff-only origin "$TARGET_BRANCH"
-          prev_seq=$(node -e "try{console.log(Number(require('./dsh-tavern-runtime.json').releaseSequence)||0)}catch{console.log(0)}")
-          next_seq=$(( prev_seq + 1 ))
-          if (( GITHUB_RUN_NUMBER > next_seq )); then
-            next_seq=$GITHUB_RUN_NUMBER
-          fi
-          node .github/scripts/write-runtime-manifest.mjs "$(git rev-parse HEAD)" "$next_seq"
-
-      - name: Publish runtime archive
-        shell: bash
-        env:
-          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          archive="$RUNNER_TEMP/runtime.zip"
-          rm -f "$archive"
-          node -e "for (const file of require('./dsh-tavern-runtime.json').files) console.log(file.path)" | zip -X -9 -q -D "$archive" -@
-          node .github/scripts/check-runtime-archive.mjs "$archive"
-          dist="runtime-archive-${TARGET_BRANCH}"
-          git worktree add --detach "$RUNNER_TEMP/dist"
-          (
-            cd "$RUNNER_TEMP/dist"
-            git checkout -q --orphan "$dist"
-            git rm -rfq .
-            cp "$archive" runtime.zip
-            git add runtime.zip
-            git commit -qm "runtime archive for $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
-            git rev-parse HEAD > "$RUNNER_TEMP/archive-commit"
-          )
-          node .github/scripts/attach-runtime-archive.mjs "$(cat "$RUNNER_TEMP/archive-commit")" "$archive"
-          node .github/scripts/stage-cdn-entrypoints.mjs "$RUNNER_TEMP/dist"
-          (
-            cd "$RUNNER_TEMP/dist"
-            git add install.ps1 install.sh android/setup.sh dsh-tavern-runtime.json
-            git commit -qm "CDN entry points for $(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
-            git push -q --force origin "HEAD:refs/heads/$dist"
-          )
-          git worktree remove --force "$RUNNER_TEMP/dist"
-          ls -l "$archive"
-
-      - name: Commit manifest
-        shell: bash
-        env:
-          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          git add dsh-tavern-runtime.json
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "chore: publish runtime manifest [skip ci]"
-          git push origin "HEAD:${TARGET_BRANCH}"
-
-      - name: Refresh and check jsDelivr caches
-        shell: bash
-        env:
-          GITHUB_REF_NAME: ${{ github.event.repository.default_branch }}
-        run: |
-          node .github/scripts/refresh-cdn.mjs --best-effort
-
-  publish-launcher:
-    needs: [sync, publish-runtime]
-    if: always() && needs.sync.outputs.should_release == 'true' && (needs.publish-runtime.result == 'success' || needs.publish-runtime.result == 'skipped')
-    runs-on: ubuntu-latest
-    concurrency:
-      group: publish-official-launcher
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-
-      - name: Pack DSH launcher plugin
-        id: pack
-        shell: bash
-        run: |
-          set -euo pipefail
-          source=tavern-plugin/packages/dsh-tavern
-          version=$(node -p "require('./$source/package.json').version")
-          app_version=$(node -p "require('./package.json').version")
-          archive="dsh-tavern-${version}.tgz"
-          artifact="$RUNNER_TEMP/$archive"
-          npm pack "./$source" --ignore-scripts --silent --pack-destination "$RUNNER_TEMP"
-          node .github/scripts/check-runtime-archive.mjs "$artifact"
-          printf 'artifact=%s\narchive=%s\nversion=%s\napp_version=%s\n' \
-            "$artifact" "$archive" "$version" "$app_version" >> "$GITHUB_OUTPUT"
-
-      - name: Publish GitHub Releases (launcher-current & versioned)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          LAUNCHER_ARTIFACT: ${{ steps.pack.outputs.artifact }}
-          LAUNCHER_ARCHIVE: ${{ steps.pack.outputs.archive }}
-          LAUNCHER_VERSION: ${{ steps.pack.outputs.version }}
-          APP_VERSION: ${{ steps.pack.outputs.app_version }}
-          UPSTREAM_COMMITS: ${{ needs.sync.outputs.upstream_commits }}
-          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
-        run: |
-          set -euo pipefail
-          head_sha=$(git rev-parse HEAD)
-          digest="sha256:$(sha256sum "$LAUNCHER_ARTIFACT" | cut -d' ' -f1)"
-          label="dsh-tavern ${LAUNCHER_VERSION}"
-          notes_file="$RUNNER_TEMP/release-notes.md"
-          cat > "$notes_file" <<EOF
-          DSH Tavern 插件包与酒馆运行环境已同步构建。
-
-          ### 在 DSH 中安装 / 升级插件
-          在 DSH 的 **插件 → 添加插件** 中粘贴下方任一地址即可安装或更新：
-          - **GitHub Release 直链**：\`https://github.com/${GITHUB_REPOSITORY}/releases/download/launcher-current/dsh-tavern.tgz\`
-          - **jsDelivr CDN 地址**：\`https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@launcher-cdn-current/dsh-tavern.tgz\`
-
-          ### 版本信息
-          - 酒馆版本：\`${APP_VERSION}\`
-          - 启动器版本：\`${LAUNCHER_VERSION}\`
-          - 当前提交：\`${head_sha}\`
-          - 上游提交：\`${UPSTREAM_SHA}\`
-          EOF
-
-          if [[ -n "$UPSTREAM_COMMITS" ]]; then
-            {
+          issue_title="[Upstream Sync] 同步上游存在代码冲突"
+          body_file="$RUNNER_TEMP/conflict-issue.md"
+          {
+            echo "自动同步上游 \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\`（\`${SHORT_SHA}\`）时检测到需要人工裁决的代码冲突，已保护 \`${DEFAULT_BRANCH}\` 与自动发版不受影响。"
+            echo ""
+            echo "### 冲突文件"
+            echo '```text'
+            echo "$CONFLICT_FILES"
+            echo '```'
+            if [[ -n "$UPSTREAM_COMMITS" ]]; then
               echo ""
-              echo "### 本次同步的上游提交"
+              echo "### 待合入的上游提交"
               echo '```text'
               echo "$UPSTREAM_COMMITS"
               echo '```'
-            } >> "$notes_file"
-          fi
-
-          replace_release_asset() {
-            local tag="$1"
-            local asset="$2"
-            local src="$3"
-            local asset_label="$4"
-            local release_id
-            release_id=$(gh release view "$tag" --json databaseId --jq .databaseId)
-            local release_assets="repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets"
-            local asset_api="repos/${GITHUB_REPOSITORY}/releases/assets"
-            local assets
-            assets=$(gh api "$release_assets" --paginate --slurp | jq 'add')
-
-            if jq -e --arg name "$asset" --arg digest "$digest" \
-              'any(.[]; .name == $name and .digest == $digest and .state == "uploaded")' <<< "$assets" >/dev/null; then
-              echo "$tag 的资产 $asset 内容未变化，跳过上传。"
-              return 0
             fi
+            echo ""
+            echo "### 本地推荐解决流程"
+            echo '```sh'
+            echo "git fetch upstream ${UPSTREAM_BRANCH}"
+            echo "git checkout ${DEFAULT_BRANCH}"
+            echo "git merge --no-ff upstream/${UPSTREAM_BRANCH}"
+            echo "# 解决冲突后运行门禁校验并推送："
+            echo "node .github/scripts/rewrite-fork-repository.mjs"
+            echo "node .github/scripts/check-fork-gate.mjs"
+            echo "git push origin ${DEFAULT_BRANCH}"
+            echo '```'
+            echo ""
+            echo "_注：完成合并并推送后，下次自动同步检测到已对齐时将自动关闭本 Issue。_"
+          } > "$body_file"
 
-            local candidate="candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${asset}"
-            cp "$src" "$RUNNER_TEMP/$candidate"
-            gh release upload "$tag" "$RUNNER_TEMP/$candidate#$asset_label"
-            local candidate_id previous_id
-            candidate_id=$(gh api "$release_assets" --paginate --slurp | jq -er --arg name "$candidate" --arg digest "$digest" \
-              'add | .[] | select(.name == $name and .digest == $digest and .state == "uploaded") | .id')
-            previous_id=$(jq -r --arg name "$asset" '.[] | select(.name == $name) | .id' <<< "$assets")
-            if [[ -n "$previous_id" ]]; then
-              gh api --method PATCH "$asset_api/$previous_id" -f name="previous-${previous_id}-${asset}" --silent
-            fi
-            if ! gh api --method PATCH "$asset_api/$candidate_id" -f name="$asset" --silent \
-              || [[ $(gh api "$asset_api/$candidate_id" --jq .name) != "$asset" ]]; then
-              if [[ -n "$previous_id" ]]; then
-                gh api --method PATCH "$asset_api/$previous_id" -f name="$asset" --silent || true
-              fi
-              return 1
-            fi
-            if [[ -n "$previous_id" ]]; then
-              gh api --method DELETE "$asset_api/$previous_id" --silent
-            fi
-          }
-
-          # 1. 更新固定入口 Release: launcher-current (dsh-tavern.tgz)
-          if ! gh release view launcher-current >/dev/null 2>&1; then
-            cp "$LAUNCHER_ARTIFACT" "$RUNNER_TEMP/dsh-tavern.tgz"
-            gh release create launcher-current "$RUNNER_TEMP/dsh-tavern.tgz#$label" \
-              --target "$head_sha" --latest=false \
-              --title "DSH Tavern Launcher (Current)" \
-              --notes-file "$notes_file"
+          issue_num=$(gh issue list --state open --search "$issue_title in:title" --json number,title \
+            --jq "map(select(.title == \"$issue_title\")) | .[0].number // empty" || true)
+          if [[ -n "$issue_num" ]]; then
+            gh issue edit "$issue_num" --body-file "$body_file"
           else
-            git tag -f launcher-current "$head_sha"
-            git push -f origin refs/tags/launcher-current
-            gh release edit launcher-current --notes-file "$notes_file"
-            replace_release_asset launcher-current dsh-tavern.tgz "$LAUNCHER_ARTIFACT" "$label"
+            gh issue create --title "$issue_title" --body-file "$body_file" || echo "::warning::未能自动创建冲突跟踪 Issue，请检查 Actions Issues 写权限。"
           fi
+          exit 1
 
-          # 2. 维护版本化 Release: launcher-v<version>
-          vtag="launcher-v${LAUNCHER_VERSION}"
-          if ! gh release view "$vtag" >/dev/null 2>&1; then
-            gh release create "$vtag" "${LAUNCHER_ARTIFACT}#${label}" \
-              --target "$head_sha" --latest=false \
-              --title "dsh-tavern ${LAUNCHER_VERSION}" \
-              --notes-file "$notes_file"
+      - name: Run Fork verification gate on sync branch
+        id: gate
+        if: steps.sync.outputs.status == 'ready'
+        shell: bash
+        run: |
+          set -uo pipefail
+          log_file="$RUNNER_TEMP/gate.log"
+          if pnpm install --frozen-lockfile > "$log_file" 2>&1 \
+            && node .github/scripts/check-fork-gate.mjs >> "$log_file" 2>&1; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "✅ 同步分支门禁测试全部通过。"
           else
-            gh release edit "$vtag" --notes-file "$notes_file"
-            replace_release_asset "$vtag" "$LAUNCHER_ARCHIVE" "$LAUNCHER_ARTIFACT" "$label"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::同步分支门禁校验未通过，将保留 Sync PR 供排查，拒绝自动合并到主分支。"
           fi
+          cat "$log_file"
+          tail -n 60 "$log_file" > "$RUNNER_TEMP/gate-tail.log" || true
 
-      - name: Publish launcher CDN branch & tag
+      - name: Create/update Sync PR and optionally auto-merge
+        id: pr
+        if: steps.sync.outputs.status == 'ready'
         shell: bash
         env:
-          LAUNCHER_ARTIFACT: ${{ steps.pack.outputs.artifact }}
-          LAUNCHER_ARCHIVE: ${{ steps.pack.outputs.archive }}
-          LAUNCHER_VERSION: ${{ steps.pack.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SYNC_BRANCH: ${{ steps.sync.outputs.sync_branch }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo || 'flizzywine/dsh-tavern' }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch || 'main' }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+          SHORT_SHA: ${{ steps.sync.outputs.short_upstream_sha }}
+          UPSTREAM_COMMITS: ${{ steps.sync.outputs.upstream_commits }}
+          AUTO_RESOLVED: ${{ steps.sync.outputs.auto_resolved_files }}
+          GATE_PASSED: ${{ steps.gate.outputs.passed }}
+          INPUT_AUTO_MERGE: ${{ inputs.auto_merge }}
+          VAR_AUTO_MERGE: ${{ vars.AUTO_MERGE_UPSTREAM_PR || 'true' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
-          # 固定 CDN 分支：launcher-cdn-current (dsh-tavern.tgz)
-          cdn_work="$RUNNER_TEMP/launcher-cdn-current"
-          git worktree add --detach "$cdn_work"
-          (
-            cd "$cdn_work"
-            git checkout -q --orphan launcher-cdn-current
-            git rm -rfq .
-            cp "$LAUNCHER_ARTIFACT" dsh-tavern.tgz
-            git add dsh-tavern.tgz
-            git commit -qm "Publish dsh-tavern.tgz ($LAUNCHER_VERSION)"
-            git push -q --force origin HEAD:refs/heads/launcher-cdn-current
-          )
-          git worktree remove --force "$cdn_work"
-
-          # 版本化 CDN tag：launcher-cdn-v<version>（不存在时推送）
-          cdn_tag="launcher-cdn-v${LAUNCHER_VERSION}"
-          if ! git ls-remote --exit-code --tags origin "refs/tags/${cdn_tag}" >/dev/null 2>&1; then
-            tag_work="$RUNNER_TEMP/launcher-cdn-tag"
-            git worktree add --detach "$tag_work"
-            (
-              cd "$tag_work"
-              git checkout -q --orphan "$cdn_tag"
-              git rm -rfq .
-              cp "$LAUNCHER_ARTIFACT" "$LAUNCHER_ARCHIVE"
-              git add "$LAUNCHER_ARCHIVE"
-              git commit -qm "Publish $LAUNCHER_ARCHIVE"
-              git push -q origin "HEAD:refs/tags/${cdn_tag}"
-            )
-            git worktree remove --force "$tag_work"
+          merged_to_main=false
+          auto_merge="$VAR_AUTO_MERGE"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            auto_merge="$INPUT_AUTO_MERGE"
           fi
 
-          # 刷新 jsDelivr 缓存（best-effort）
-          curl -fsSL "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@launcher-cdn-current/dsh-tavern.tgz" >/dev/null || true
+          pr_title="chore: sync upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} (${SHORT_SHA})"
+          body_file="$RUNNER_TEMP/sync-pr.md"
+          {
+            echo "自动从 \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\`（\`${UPSTREAM_SHA}\`）同步最新上游更新并完成 Fork 仓库引用重写。"
+            echo ""
+            if [[ "$GATE_PASSED" == "true" ]]; then
+              echo "- **门禁校验**：✅ 通过（构建检查、引用校验、纯 Node 核心单测）"
+            else
+              echo "- **门禁校验**：❌ 失败（已拦截自动合入 \`${DEFAULT_BRANCH}\`，请查看下方失败摘要或 Actions 日志）"
+            fi
+            if [[ -n "$UPSTREAM_COMMITS" ]]; then
+              echo ""
+              echo "### 包含的上游提交"
+              echo '```text'
+              echo "$UPSTREAM_COMMITS"
+              echo '```'
+            fi
+            if [[ -n "$AUTO_RESOLVED" ]]; then
+              echo ""
+              echo "### 已自动解决的派生/仓库引用冲突"
+              echo '```text'
+              echo "$AUTO_RESOLVED"
+              echo '```'
+            fi
+            if [[ "$GATE_PASSED" != "true" && -s "$RUNNER_TEMP/gate-tail.log" ]]; then
+              echo ""
+              echo "### 门禁校验末尾日志"
+              echo '```text'
+              cat "$RUNNER_TEMP/gate-tail.log"
+              echo '```'
+            fi
+          } > "$body_file"
 
-      - name: Write workflow summary
-        shell: bash
-        env:
-          LAUNCHER_VERSION: ${{ steps.pack.outputs.version }}
-          APP_VERSION: ${{ steps.pack.outputs.app_version }}
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          ## 同步与打包完成
+          pr_number=$(gh pr list --state open --head "$SYNC_BRANCH" --base "$DEFAULT_BRANCH" --json number --jq '.[0].number // empty' || true)
+          if [[ -z "$pr_number" ]]; then
+            if ! pr_url=$(gh pr create --base "$DEFAULT_BRANCH" --head "$SYNC_BRANCH" --title "$pr_title" --body-file "$body_file" 2>"$RUNNER_TEMP/pr-err.log"); then
+              cat "$RUNNER_TEMP/pr-err.log" >&2
+              echo "::warning::无法由 Actions 自动创建 PR。请确认仓库 Settings → Actions → General → Workflow permissions 中已勾选 Allow GitHub Actions to create and approve pull requests；目前仍可通过分支 ${SYNC_BRANCH} 手动创建 PR。"
+              printf 'merged_to_main=false\n' >> "$GITHUB_OUTPUT"
+              [[ "$GATE_PASSED" == "true" ]] && exit 0 || exit 1
+            fi
+            pr_number=$(gh pr view "$pr_url" --json number --jq .number)
+            echo "已创建同步 PR #${pr_number}: ${pr_url}"
+          else
+            gh pr edit "$pr_number" --title "$pr_title" --body-file "$body_file"
+            echo "已更新既有同步 PR #${pr_number}"
+          fi
 
-          - **酒馆版本**：\`${APP_VERSION}\`
-          - **启动器插件版本**：\`${LAUNCHER_VERSION}\`
+          if [[ "$GATE_PASSED" == "true" && "$auto_merge" == "true" ]]; then
+            if gh pr merge "$pr_number" --merge --delete-branch; then
+              merged_to_main=true
+              echo "PR #${pr_number} 已自动合入 ${DEFAULT_BRANCH}，即将触发发布流水线。"
+              issue_title="[Upstream Sync] 同步上游存在代码冲突"
+              issue_num=$(gh issue list --state open --search "$issue_title in:title" --json number,title \
+                --jq "map(select(.title == \"$issue_title\")) | .[0].number // empty" || true)
+              if [[ -n "$issue_num" ]]; then
+                gh issue close "$issue_num" --comment "同步 PR #${pr_number} 已无冲突合并至 \`${DEFAULT_BRANCH}\`，自动关闭本冲突提醒。"
+              fi
+            else
+              echo "::warning::PR #${pr_number} 门禁已通过，但未能自动合并（可能受分支保护规则限制），请前往 GitHub 手动点击 Merge。"
+            fi
+          elif [[ "$GATE_PASSED" != "true" ]]; then
+            printf 'merged_to_main=false\n' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
-          ### DSH 插件安装 / 升级地址（任选其一粘贴到「插件 → 添加插件」）
-          - GitHub Release：\`https://github.com/${GITHUB_REPOSITORY}/releases/download/launcher-current/dsh-tavern.tgz\`
-          - jsDelivr CDN：\`https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@launcher-cdn-current/dsh-tavern.tgz\`
-          EOF
+          printf 'merged_to_main=%s\n' "$merged_to_main" >> "$GITHUB_OUTPUT"
+
+  release-after-merge:
+    needs: sync-and-pr
+    if: github.repository != 'flizzywine/dsh-tavern' && needs.sync-and-pr.outputs.merged_to_main == 'true'
+    uses: ./.github/workflows/fork-release.yml
+    permissions:
+      contents: write
+    with:
+      target_branch: ${{ github.event.repository.default_branch }}
+      force_launcher: ${{ inputs.force_launcher == true }}
+      skip_tests: true
+      upstream_sha: ${{ needs.sync-and-pr.outputs.upstream_sha }}
+      upstream_commits: ${{ needs.sync-and-pr.outputs.upstream_commits }}

@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.repository == 'flizzywine/dsh-tavern'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

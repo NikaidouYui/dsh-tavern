@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.repository == 'flizzywine/dsh-tavern'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

@@ -25,9 +25,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.8.0
+
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Run plugin unit checks
         shell: bash
@@ -35,6 +43,7 @@ jobs:
           set -euo pipefail
           node tavern-plugin/packages/dsh-tavern-request-monitor/build.mjs --check
           node tavern-plugin/packages/dsh-tavern-input-escape/build.mjs --check
+          node --test tests/plugin-request-monitor.test.mjs tests/plugin-input-escape.test.mjs
 
       - name: Stage plugin branches & build ZIP archives
         id: stage

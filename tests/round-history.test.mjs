@@ -1484,4 +1484,127 @@ test('直接指定轮次回退 rollbackTo 能越过重生成失败轮次而不�
   assert.doesNotMatch(JSON.stringify(reopened.deriveMessages()), /第2轮正文|第3轮正文/)
 })
 
+test('失败尾或清除截断回复后直接原生重生成，清理前序孤立输入与工具碎片；恢复重放幂等且不破坏退回', async () => {
+  for (const mode of ['failed-turn', 'cleared-reply', 'stream-rewrite']) {
+    const model = { kind: 'model', provider: 'fixture', model: 'fixture' }
+    const session = Session.create('failed-tail-clean-' + mode)
+    const timeline = createStoryTimeline()
+    let chat = {
+      id: 'chat', sessionId: session.id, mode: 'story', _storageRevision: 1,
+      messages: [{ role: 'assistant', greeting: true, text: '开场白', turn: 1 }],
+      nativeCommits: {}, userInputEdits: {},
+      timeline: { branchId: 'main', revision: 1, checkpoints: [], operations: {}, participants: {} }
+    }
+    const revisions = new Map()
+    const appendText = (turn, role, text, source = { kind: 'user', rpcId: 'rpc-' + turn }) => {
+      return role === 'user'
+        ? appendSessionEvent(session, 'user/message', { id: 'in-' + turn, role: 'user', content: [{ type: 'text', text }], source }, { surfaceOp: 'append' })
+        : appendSessionEvent(session, 'assistant/message', { turn, step: 1, message: { id: 'out-' + turn, role: 'assistant', content: [{ type: 'text', text }], source: model } }, { surfaceOp: 'append', sourceEventSeqs: [] })
+    }
+    // Turn 1: 已完成第 1 轮
+    appendSessionEvent(session, 'turn/start', { turn: 1 })
+    const u1 = appendText(1, 'user', '第一轮输入')
+    const a1 = appendText(1, 'assistant', '第一轮正文')
+    appendSessionEvent(session, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
+    chat.messages.push(
+      { role: 'user', turn: 1, text: '第一轮输入', native: true, source: { kind: 'user', rpcId: 'rpc-1' } },
+      { role: 'assistant', turn: 1, text: '第一轮正文', nativeAnchor: { formatVersion: 4, turn: 1, input: u1.seq, reply: a1.seq } }
+    )
+    chat.nativeCommits['1'] = { turn: 1, userText: '第一轮输入' }
+    revisions.set(1, structuredClone(chat))
+
+    // Turn 2: 玩家输入 2 未得到可用回复（报错失败 / 清除截断正文后保留输入）
+    appendSessionEvent(session, 'turn/start', { turn: 2 })
+    const u2 = appendText(2, 'user', '第二轮输入', { kind: 'user', rpcId: 'rpc-2' })
+    if (mode === 'cleared-reply') {
+      const a2 = appendText(2, 'assistant', '截断的一半正文')
+      appendSessionEvent(session, 'turn/end', { turn: 2, reason: { kind: 'completed' } })
+      appendSessionEvent(session, 'user/message', {
+        id: 'del-2', role: 'user', content: [], source: { kind: 'plugin:dsh-tavern', form: 'message-deletion' }
+      }, { surfaceOp: { op: 'replace', start: a2.seq, end: a2.seq }, sourceEventSeqs: [a2.seq] })
+    } else {
+      appendSessionEvent(session, 'assistant/message', {
+        turn: 2, step: 1, message: { id: 'partial-2', role: 'assistant', content: [{ type: 'text', text: '失败工具半截' }], source: model }
+      }, { surfaceOp: 'append', sourceEventSeqs: [] })
+      appendSessionEvent(session, 'turn/end', { turn: 2, reason: { kind: 'error', error: { message: '429' } } })
+    }
+    chat.messages.push({ role: 'user', text: '第二轮输入', sourceText: '第二轮输入', native: true, source: { kind: 'user', rpcId: 'rpc-2' } })
+    chat.userInputEdits['2'] = { text: '第二轮输入', id: 'in-2', seq: u2.seq, role: 'user' }
+    revisions.set(2, structuredClone(chat))
+
+    const agent = {
+      session, phase: { kind: 'idle', lastTurn: 2 },
+      followup(msg) { this.input = msg },
+      async whenIdle() {
+        const turn = ++this.phase.lastTurn
+        appendSessionEvent(session, 'turn/start', { turn })
+        appendSessionEvent(session, 'user/message', { ...this.input, turn }, { surfaceOp: 'append' })
+        if (mode === 'stream-rewrite') {
+          appendSessionEvent(session, 'assistant/attempt', { turn, step: 1, stream: [{ type: 'text-chunks', index: 0, texts: ['流式补写正文'] }] })
+          appendSessionEvent(session, 'turn/end', { turn, reason: { kind: 'aborted', reason: { kind: 'user' } } })
+        } else {
+          appendSessionEvent(session, 'assistant/message', { turn, step: 1, message: { id: 'a2-new', role: 'assistant', content: [{ type: 'text', text: '第二轮新正文' }], source: model } }, { surfaceOp: 'append' })
+          appendSessionEvent(session, 'turn/end', { turn, reason: { kind: 'completed' } })
+        }
+      }
+    }
+    const chats = {
+      read: async () => structuredClone(chat),
+      forSession: async () => structuredClone(chat),
+      readCard: async () => ({ name: '角色' }),
+      readRevision: async (_id, revision) => revisions.has(revision) ? structuredClone(revisions.get(revision)) : undefined,
+      update: async (_id, mutate) => {
+        revisions.set(chat._storageRevision, structuredClone(chat))
+        const next = await mutate(structuredClone(chat))
+        if (next) {
+          next._storageRevision = (chat._storageRevision || 1) + 1
+          chat = structuredClone(next)
+          revisions.set(chat._storageRevision, structuredClone(chat))
+        }
+        return structuredClone(chat)
+      }
+    }
+    const sessionState = createSessionStateView({
+      activity: () => ({ busy: false }),
+      evidence: () => ({ session, events: readSessionEvents(session) })
+    })
+    const history = createRoundHistory({
+      chats, timeline,
+      sessions: { get: () => agent, flush: async () => {} },
+      scripts: { read: async () => ({}), continuity: { transition: () => ({ state: {} }) } },
+      prepareRegenerationFrame: async input => ({ userText: input.userText, frame: { kind: 'foreground', frameId: 'f', operationId: 'o', turn: input.turn, chatId: chat.id, contributions: [] } }),
+      queueSettlement: async () => {},
+      present: async value => structuredClone(value)
+    })
+
+    await history.regenerate(chat.id, '', session.id)
+
+    const reopened = Session.fromRestore(session.id, readSessionEvents(session), session.header, 0, 'detached')
+    const derivedUserTexts = reopened.deriveMessages()
+      .filter(m => m.role === 'user')
+      .map(m => (m.content || []).filter(b => b.type === 'text').map(b => b.text).join(''))
+      .filter(Boolean)
+    assert.deepEqual(derivedUserTexts, ['第一轮输入', '第二轮输入'], `${mode}: 模型上下文不得出现重复的第二轮输入`)
+    assert.doesNotMatch(JSON.stringify(reopened.deriveMessages()), /失败工具半截|截断的一半正文/, `${mode}: 失败残留应已被清理`)
+    assert.ok(chat.suppressedDshTurns.includes(2), `${mode}: Turn 2 应计入 suppressedDshTurns`)
+    assert.equal(chat.userInputEdits['2'], undefined, `${mode}: Turn 2 的输入编辑缓存应随清理移除`)
+
+    const state = sessionState.rollback(projectChatSessionState(chat))
+    if (mode !== 'stream-rewrite') {
+      assert.ok(state.keptInputTurns.includes(2), `${mode}: 页面记录仍需保留 Turn 2 玩家气泡展示`)
+    }
+
+    // 退回该轮后不应在表面尾部残余原 Turn 2 失败输入或重新冒出失败轮
+    const rolled = await history.rollback(session.id, chat.id)
+    assert.ok(rolled.rolledBack)
+    const afterRollback = Session.fromRestore(session.id, readSessionEvents(session), session.header, 0, 'detached')
+    const userTextsAfterRollback = afterRollback.deriveMessages()
+      .filter(m => m.role === 'user')
+      .map(m => (m.content || []).filter(b => b.type === 'text').map(b => b.text).join(''))
+      .filter(Boolean)
+    assert.deepEqual(userTextsAfterRollback, ['第一轮输入'], `${mode}: 退回后不得残留第二轮孤立输入`)
+    assert.equal(sessionState.rollback(projectChatSessionState(chat)).clearIncompleteReplyTarget, null, `${mode}: 退回后不得暴露未清理失败尾`)
+  }
+})
+
 

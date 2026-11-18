@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { createScopedMessages, isScopedMessages } from './scoped-messages.js'
 import { diffJson } from './json-mutation.js'
 import { promptSection } from './prompt-section.js'
-import { rollbackAvailability, clearFailedTurnSurface, locateRegenerationSurface, locateRollbackSurface, unclaimedRegenerationSurfaces, planRegenerationSurface, regenerationProjection, replayableFailedTurn, replayablePersistedTurn, anchoredToSaveRow, unansweredTailIndex, surfaceTurnOfSeq } from './rollback-surface.js'
+import { rollbackAvailability, clearFailedTurnSurface, planPriorUnansweredTailCleanup, locateRegenerationSurface, locateRollbackSurface, unclaimedRegenerationSurfaces, planRegenerationSurface, regenerationProjection, replayableFailedTurn, replayablePersistedTurn, anchoredToSaveRow, unansweredTailIndex, surfaceTurnOfSeq } from './rollback-surface.js'
 
 // Both regeneration paths (native and plugin) read the same tail rule.
 export { unansweredTailIndex }
@@ -700,6 +700,15 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     // miss it whenever the two
     // numberings differ.
     const replacingTurn = appending ? null : surfaceTurnOfSeq(sessionEvents(session), oldSeq)
+    const priorTail = failedTail
+      ? planPriorUnansweredTailCleanup({
+          chat: originalChat,
+          events: sessionEvents(session),
+          nodes: session.surface?.nodes || [],
+          inputRow,
+          beforeOriginSeq: eventStart
+        })
+      : null
     const attempt = regenerationRecovery.attempt({
       originalChat, session, sessionId: effectiveSessionId, operationId, eventStart, replacingTurn,
       assistantIndex: failedTail ? null : oldAssistantIndex, inputIndex
@@ -855,6 +864,19 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
       const next = completed.chat
       const appendAnchor = appending ? attemptNativeAnchor(session, eventStart, syntheticTurn) : null
       const rewriteFailedTail = failedTail && (keptStreamed || appendAnchor === null)
+      const priorCleanup = priorTail && (priorTail.unclearedTurns.length || priorTail.orphanTail)
+        ? {
+            attemptEventStart: eventStart,
+            failedTurns: priorTail.unclearedTurns,
+            ...(priorTail.orphanTail ? { orphanTail: priorTail.orphanTail } : {})
+          }
+        : null
+      const clearedPriorTurns = priorTail
+        ? [...new Set([...(priorTail.failedTurns || []), ...(priorTail.orphanTail?.turn > 0 ? [priorTail.orphanTail.turn] : [])])]
+        : []
+      const clearedEditTurns = failedTail
+        ? [...new Set([...clearedPriorTurns, ...(rewriteFailedTail ? [syntheticTurn] : [])])]
+        : []
       next.nativeCommits = originalChat.nativeCommits && typeof originalChat.nativeCommits === 'object' ? structuredClone(originalChat.nativeCommits) : {}
       next.suppressedDshTurns = Array.isArray(originalChat.suppressedDshTurns) ? [...originalChat.suppressedDshTurns] : []
       next.regeneratedDshTurns = originalChat.regeneratedDshTurns && typeof originalChat.regeneratedDshTurns === 'object' && !Array.isArray(originalChat.regeneratedDshTurns)
@@ -870,9 +892,14 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
         delete next.nativeCommits[String(syntheticTurn)]
         next.suppressedDshTurns = [...new Set([...next.suppressedDshTurns, syntheticTurn])].sort((left, right) => left - right)
         next.regeneratedDshTurns[String(oldTurn)] = syntheticTurn
-      } else if (rewriteFailedTail) {
-        delete next.nativeCommits[String(syntheticTurn)]
-        next.suppressedDshTurns = [...new Set([...next.suppressedDshTurns, syntheticTurn])].sort((left, right) => left - right)
+      } else {
+        if (clearedPriorTurns.length) {
+          next.suppressedDshTurns = [...new Set([...next.suppressedDshTurns, ...clearedPriorTurns])].sort((left, right) => left - right)
+        }
+        if (rewriteFailedTail) {
+          delete next.nativeCommits[String(syntheticTurn)]
+          next.suppressedDshTurns = [...new Set([...next.suppressedDshTurns, syntheticTurn])].sort((left, right) => left - right)
+        }
       }
       // A replacement rewrites the old reply in place; the answered tail only has
       // to record where its reply already landed, unless an interrupted attempt
@@ -880,8 +907,10 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
       const projection = rewriteFailedTail
         ? {
             kind: 'append-round',
+            operationId,
             attemptEventStart: eventStart,
             failedTurn: syntheticTurn,
+            ...(priorCleanup ? { priorCleanup } : {}),
             storyTurn,
             input: {
               id: 'tavern-regen-input:' + operationId,
@@ -901,7 +930,12 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
             }
           }
         : appending
-          ? { kind: 'append-round', storyTurn, native: appendAnchor }
+          ? {
+              kind: 'append-round',
+              storyTurn,
+              native: appendAnchor,
+              ...(priorCleanup ? { operationId, priorCleanup } : {})
+            }
           : placeRegeneration(session, oldSeq, eventStart, { turn: storyTurn, step: 1,
             message: { id: 'tavern-regen:' + operationId, role: 'assistant', content: [{ type: 'text', text: prose.text }],
               source: { ...oldSource, tavernStoryTurn: storyTurn } } }, operationId)
@@ -932,6 +966,14 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
           'nativeCommits', 'suppressedDshTurns', 'regeneratedDshTurns']) {
           if (Object.hasOwn(next, key)) current[key] = structuredClone(next[key])
           else delete current[key]
+        }
+        if (clearedEditTurns.length && current.userInputEdits && typeof current.userInputEdits === 'object' && !Array.isArray(current.userInputEdits)) {
+          const edits = { ...current.userInputEdits }
+          let editsChanged = false
+          for (const turn of clearedEditTurns) {
+            if (Object.hasOwn(edits, String(turn))) { delete edits[String(turn)]; editsChanged = true }
+          }
+          if (editsChanged) current.userInputEdits = edits
         }
       } }))
       committed = true

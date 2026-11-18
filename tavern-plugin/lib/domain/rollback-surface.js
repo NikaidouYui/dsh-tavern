@@ -919,6 +919,9 @@ export function applyRegenerationProjection(session, projection) {
   // An answered tail streams its own reply into the log; there is no projection
   // to write, only the anchors that name the rows it already produced.
   if (projection.kind === 'append-round' && projection.native !== undefined) {
+    if (projection.priorCleanup) {
+      clearPriorUnansweredTailSurface(session, projection.priorCleanup, projection.operationId || ('regen-' + projection.storyTurn))
+    }
     return projection.native === null ? null : { nativeAnchor: projection.native }
   }
   if (projection.kind === 'append-round') return applyIndependentRoundProjection(session, projection)
@@ -999,6 +1002,9 @@ function applyIndependentRoundProjection(session, projection) {
     surface.editStep((turn, step) => {
       // Opening the new edit turn first keeps cleanup and both appends in one
       // native turn. A crash can safely retry each append by its stable id.
+      if (projection.priorCleanup) {
+        clearPriorUnansweredTailSurface(session, projection.priorCleanup, projection.operationId || projection.input?.id || projection.data?.message?.id || randomUUID())
+      }
       if (Number.isSafeInteger(projection.attemptEventStart)) {
         clearRegenerationAttemptSurface({
           session,
@@ -1077,20 +1083,45 @@ function planTurnTailCut({ nodes, startSeq, endSeq }) {
   return Object.freeze({ start: seqs[index], end: seqs.at(-1), shadowedSeqs: Object.freeze(seqs.slice(index)) })
 }
 
+function isEmptyTailTombstone(event, events) {
+  if (!event) return false
+  if (isRollbackUserTombstone(event) || isRollbackAssistantTombstone(event, events)) return true
+  if (event.type === 'user/message' && isProducerSource(event.data?.source, 'dsh-tavern') && event.data?.source?.form === 'message-deletion') {
+    return Array.isArray(event.data.content) && event.data.content.length === 0
+  }
+  return Boolean(event.type === 'assistant/message' && event.surfaceOp?.op === 'replace'
+    && Array.isArray(event.data?.message?.content) && event.data.message.content.length === 0)
+}
+
+function nodesBeforeOrigin(nodes, ownership, beforeOriginSeq) {
+  const list = Array.isArray(nodes) ? nodes : []
+  const ceiling = Number(beforeOriginSeq)
+  if (!Number.isSafeInteger(ceiling)) return list
+  const index = list.findIndex(seq => {
+    const origin = ownership.firstOrigin(Number(seq))
+    return (Number.isSafeInteger(origin) ? origin : Number(seq)) >= ceiling
+  })
+  return index >= 0 ? list.slice(0, index) : list
+}
+
 export function planFailedTurnSurface(input) {
   const events = Array.isArray(input && input.events) ? input.events : []
-  const nodes = Array.isArray(input && input.nodes) ? input.nodes : []
+  const rawNodes = Array.isArray(input && input.nodes) ? input.nodes : []
   const turn = Math.max(0, Number(input && input.turn) || 0)
   const interval = turnIntervals(events).findLast(interval => interval.turn === turn)
   if (!interval) return null
   const { start: startSeq, end: endSeq } = interval
+  const ownership = input.ownership || createSurfaceOwnership(events)
+  const ceiling = Number(input && input.beforeOriginSeq)
+  const hasCeiling = Number.isSafeInteger(ceiling)
+  const nodes = hasCeiling ? nodesBeforeOrigin(rawNodes, ownership, ceiling) : rawNodes
 
   try {
     return planSurfaceRecovery({
       nodes,
-      ownership: input.ownership || createSurfaceOwnership(events),
+      ownership,
       selectOrigin: event => event.seq > startSeq && event.seq < endSeq,
-      inScope: event => event.seq > startSeq,
+      inScope: event => event.seq > startSeq && (!hasCeiling || event.seq < ceiling),
       ignore: isRollbackUserTombstone,
       message: '失败回合的模型消息面不是连续区间，无法安全清理'
     })
@@ -1106,7 +1137,8 @@ export function clearFailedTurnSurface(input) {
   const cleanup = planFailedTurnSurface({
     events: sessionEvents(session),
     nodes: session.surface && session.surface.nodes,
-    turn: input.turn
+    turn: input.turn,
+    beforeOriginSeq: input.beforeOriginSeq
   })
   if (cleanup === null) return 0
   const makeId = typeof input.id === 'function' ? input.id : function () { return randomUUID() }
@@ -1119,6 +1151,109 @@ export function clearFailedTurnSurface(input) {
     source: { kind: 'plugin:dsh-tavern-failed-turn-cleanup' }
   }, { start: cleanup.start, end: cleanup.end, sourceEventSeqs: cleanup.shadowedSeqs })
   return cleanup.shadowedSeqs.length
+}
+
+function isSafeOrphanTailRange(events, tailSeqs, anchorSeq) {
+  return Array.isArray(tailSeqs) && tailSeqs.length > 0 && !tailSeqs.some(seq => {
+    const event = eventAt(events, seq)
+    if (!event || isCompactionCheckpoint(event)) return true
+    if (event.type === 'assistant/message' && modelSourceOf(event) !== null && !isEmptyTailTombstone(event, events)) return true
+    return isNewTurnInput(event) && Number(seq) !== Number(anchorSeq)
+  })
+}
+
+/** 识别未回答尾部重生成之前残留在表面末尾的失败轮及被清回复留下的孤立输入。 */
+export function planPriorUnansweredTailCleanup({ chat, events = [], nodes = [], inputRow = null, beforeOriginSeq } = {}) {
+  const ownership = createSurfaceOwnership(events)
+  const prefixNodes = nodesBeforeOrigin(nodes, ownership, beforeOriginSeq)
+  const availability = rollbackAvailability(chat, { events, nodes: prefixNodes })
+  const failedTurns = availability.failedTurns || []
+  const unclearedTurns = availability.unclearedTurns || []
+  let remainingNodes = [...prefixNodes]
+  for (const turn of unclearedTurns) {
+    const plan = planFailedTurnSurface({ events, nodes: remainingNodes, turn, ownership, beforeOriginSeq })
+    if (!plan) continue
+    const removed = new Set(plan.shadowedSeqs.map(Number))
+    remainingNodes = remainingNodes.filter(seq => !removed.has(Number(seq)))
+  }
+  let orphanTail = null
+  const unansweredIndex = unansweredTailIndex(chat)
+  if (unansweredIndex >= 0) {
+    const messages = Array.isArray(chat?.messages) ? chat.messages : []
+    const tailRow = inputRow || messages[unansweredIndex]
+    const lastAssistantIndex = messages.slice(0, unansweredIndex).findLastIndex(row => row?.role === 'assistant' && row.placeholder !== true)
+    const keptEarlierUsers = (lastAssistantIndex >= 0 ? messages.slice(lastAssistantIndex + 1, unansweredIndex) : messages.slice(0, unansweredIndex))
+      .filter(row => row?.role === 'user' && row.placeholder !== true).length
+    const trailingInputs = []
+    for (let index = remainingNodes.length - 1; index >= 0; index -= 1) {
+      const event = eventAt(events, remainingNodes[index])
+      if (!event) continue
+      if (isCompactionCheckpoint(event)) break
+      if (event.type === 'assistant/message' && modelSourceOf(event) !== null && !isEmptyTailTombstone(event, events)) break
+      if (isNewPlayerInput(event)) trailingInputs.push(event)
+    }
+    trailingInputs.reverse()
+    const lastInputEvent = trailingInputs.at(-1) || null
+    if (lastInputEvent) {
+      const eventRpc = typeof lastInputEvent.data?.source?.rpcId === 'string' ? lastInputEvent.data.source.rpcId.trim() : ''
+      const rowRpc = typeof tailRow?.source?.rpcId === 'string' ? tailRow.source.rpcId.trim() : ''
+      const rpcMatches = eventRpc !== '' && rowRpc !== '' ? eventRpc === rowRpc : true
+      const eventText = contentText(lastInputEvent.data)
+      const textMatches = ['sourceText', 'text'].some(key => typeof tailRow?.[key] === 'string' && tailRow[key].trim() === eventText)
+      const sameTurnCount = eventRpc !== '' && rowRpc !== '' ? rpcMatches : (trailingInputs.length > keptEarlierUsers && textMatches)
+      if (rpcMatches && sameTurnCount) {
+        const startIndex = remainingNodes.indexOf(lastInputEvent.seq)
+        const tailSeqs = startIndex >= 0 ? remainingNodes.slice(startIndex).map(Number) : []
+        if (isSafeOrphanTailRange(events, tailSeqs, lastInputEvent.seq)) {
+          const turn = surfaceTurnOfSeq(events, lastInputEvent.seq) || (() => {
+            const startEvent = events.findLast(item => item?.type === 'turn/start' && Number(item.seq) < Number(lastInputEvent.seq))
+            return Number(startEvent?.data?.turn) || 0
+          })()
+          orphanTail = Object.freeze({ inputSeq: Number(lastInputEvent.seq), turn: Number.isSafeInteger(turn) && turn > 0 ? turn : 0 })
+        }
+      }
+    }
+  }
+  return Object.freeze({ failedTurns, unclearedTurns, orphanTail })
+}
+
+/** 幂等清理未回答尾部重生成之前残留在表面末尾的失败轮与孤立输入。 */
+export function clearPriorUnansweredTailSurface(session, priorCleanup, baseId = randomUUID()) {
+  if (!session || !priorCleanup || typeof session.append !== 'function') return 0
+  let cleared = 0
+  const beforeOriginSeq = Number.isSafeInteger(Number(priorCleanup.attemptEventStart)) ? Number(priorCleanup.attemptEventStart) : undefined
+  for (const turn of priorCleanup.failedTurns || []) {
+    cleared += clearFailedTurnSurface({
+      session,
+      turn,
+      beforeOriginSeq,
+      id: () => `${baseId}:failed-cleanup:${turn}`
+    })
+  }
+  const orphanInputSeq = Number(priorCleanup.orphanTail?.inputSeq)
+  if (Number.isSafeInteger(orphanInputSeq) && orphanInputSeq >= 0) {
+    const events = sessionEvents(session)
+    const ownership = createSurfaceOwnership(events)
+    const prefixNodes = nodesBeforeOrigin(session.surface?.nodes || [], ownership, beforeOriginSeq)
+    const startIndex = prefixNodes.findIndex(seq =>
+      Number(seq) === orphanInputSeq || Number(ownership.firstOrigin(Number(seq))) === orphanInputSeq)
+    if (startIndex >= 0) {
+      const startEvent = eventAt(events, prefixNodes[startIndex])
+      if (!isEmptyTailTombstone(startEvent, events)) {
+        const tailSeqs = prefixNodes.slice(startIndex).map(Number)
+        if (isSafeOrphanTailRange(events, tailSeqs, prefixNodes[startIndex])) {
+          replaceSessionSurface(session, 'user/message', {
+            id: `${baseId}:tail-cleanup`,
+            role: 'user',
+            content: [],
+            source: { kind: 'plugin:dsh-tavern-failed-turn-cleanup' }
+          }, { start: tailSeqs[0], end: tailSeqs.at(-1), sourceEventSeqs: tailSeqs })
+          cleared += tailSeqs.length
+        }
+      }
+    }
+  }
+  return cleared
 }
 
 /** Remove only the temporary DSH surface nodes appended by a regeneration attempt. */

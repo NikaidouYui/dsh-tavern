@@ -77,6 +77,7 @@ test('Fork 与上游工作流配置隔离、引用脚本存在且职责边界清
   assert.match(syncWorkflow, /workflow_dispatch:/)
   assert.match(syncWorkflow, /node \.github\/scripts\/sync-upstream\.mjs --report-conflict/)
   assert.match(syncWorkflow, /node \.github\/scripts\/check-fork-gate\.mjs/)
+  assert.match(syncWorkflow, /GH_REPO:\s*\$\{\{\s*github\.repository\s*\}\}/)
   assert.match(syncWorkflow, /uses:\s*\.\/\.github\/workflows\/fork-release\.yml/)
   assert.match(syncWorkflow, /github\.repository\s*!=\s*'flizzywine\/dsh-tavern'/)
 

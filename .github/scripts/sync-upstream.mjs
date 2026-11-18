@@ -158,7 +158,7 @@ export async function syncUpstream({
   if (push && mirrorBranch) {
     const mirrorPush = activeTransport.pushMirror({ mirrorBranch, upstreamSha })
     if (mirrorPush && mirrorPush.status !== 0) {
-      console.warn(`::warning::更新纯净镜像分支 ${mirrorBranch} 跳过（可能存在非快进差异）：${mirrorPush.stderr || mirrorPush.stdout}`)
+      console.warn(`::warning::更新纯净镜像分支 ${mirrorBranch} 跳过（可能存在非快进差异或包含 .github/workflows 变更）：${mirrorPush.stderr || mirrorPush.stdout}`)
     }
   }
 

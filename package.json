@@ -1,0 +1,40 @@
+{
+  "name": "dsh-tavern-input-escape",
+  "version": "1.0.0",
+  "description": "DSH Tavern 输入转义与防路由插件：支持 JSON \\uXXXX 整包转义、紧凑码点转义、Canvas 输入转图片、深度破盾与防路由清洗，不修改存档原文。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "client.js",
+    "build.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "dsh-tavern-plugin"
+      ]
+    },
+    "compatibility": {
+      "tavernApiVersion": 8
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:check": "node build.mjs --check"
+  },
+  "license": "MIT"
+}

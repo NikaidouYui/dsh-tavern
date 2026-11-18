@@ -18,14 +18,14 @@ import { initializationFixture } from './fixtures/conversation-initialization.mj
 
 const reply = (id, turn) => ({ turn, step: 1, message: { id, role: 'assistant', content: [{ type: 'text', text: id }], source: { kind: 'model', provider: 'test', model: 'test' } } })
 
-function harness({ chat, session = Session.create('story'), agent = null } = {}) {
+function harness({ chat, session = Session.create('story'), agent = null, readSlice = async () => null } = {}) {
   const reads = [], writes = []
   let saved = structuredClone(chat)
   const service = createStoryReconciliation({
     agentRegistry: new Map(agent ? [['story', agent]] : []),
     sessionStore: new Map([['story', session]]),
     chatForSession: async id => { reads.push(id); return id === 'story' ? structuredClone(saved) : undefined },
-    chatSliceForSession: async () => null,
+    chatSliceForSession: readSlice,
     async updateChat(id, mutate, options) { const next = mutate(structuredClone(saved)); writes.push(options.source); if (next) saved = next; return saved },
     turns: { finalize: async () => assert.fail('nothing to adopt') }
   })
@@ -520,4 +520,21 @@ test('编辑投影回合后紧跟新玩家轮与失败清理时，inputEventForT
   const h = harness({ session, chat })
   await h.service.reconcileWhenIdle('story')
   assert.equal(h.saved().messages.length, 2, '闲置核对不得向存档补写假轮')
+})
+
+test('an alignment warning without a repair reads the save once', async t => {
+  t.mock.method(console, 'warn', () => {})
+  const h = harness({ chat: { id: 'game', mode: 'story', nativeSync: { status: 'stale' }, messages: [] } })
+  assert.equal((await h.service.reconcileStory('story')).aligned, false)
+  assert.equal(h.reads.length, 1)
+  assert.deepEqual(h.writes, [])
+})
+
+test('a save revision change between header and history reads leaves reconciliation for the next request', async () => {
+  const h = harness({ readSlice: async (_id, indices) => ({
+    messageCount: 1, chat: { id: 'game', mode: 'story', _storageRevision: indices.length ? 2 : 1, messages: [] }
+  }) })
+  assert.equal(await h.service.reconcileStory('story'), null)
+  assert.deepEqual(h.reads, [])
+  assert.deepEqual(h.writes, [])
 })

@@ -103,6 +103,12 @@
     "@deepseek-ai/dsh-session/surface",
     "@deepseek-ai/dsh-tools"
   ],
+  "tavern-plugin/lib/domain/background-descriptors.js": [
+    "@deepseek-ai/dsh-subagent"
+  ],
+  "tavern-plugin/lib/domain/director-descriptor-repair.js": [
+    "@deepseek-ai/dsh-subagent"
+  ],
   "tavern-plugin/lib/domain/host-stream-timeout-patch.js": [
     "@deepseek-ai/dsh-llm-deepseek",
     "@deepseek-ai/dsh-llm-pi-ai"

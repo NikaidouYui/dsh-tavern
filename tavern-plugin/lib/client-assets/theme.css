@@ -732,7 +732,8 @@ textarea.fork-status-guide-input:focus { outline: none; border-color: color-mix(
 }
 [data-dsh-card-stage] .dsh-tavern-assistant { color: var(--stage-text, var(--fork-ink)); font-family: var(--fork-font-reading); }
 [data-dsh-card-stage] .dsh-tavern-mvu-receipt { color: var(--stage-muted, var(--fork-ink-3)); }
-[data-dsh-card-stage] .dsh-tavern-dock-actions .dsh-tavern-choice-trigger { background: rgb(from var(--stage-panel, var(--fk-s-base-bgSolid)) r g b); color: var(--stage-text, var(--fork-ink-2)); border-color: var(--stage-border, var(--fork-hairline)); }
+[data-dsh-card-stage] .dsh-tavern-dock-actions .dsh-tavern-choice-trigger,
+[data-dsh-card-stage] .dsh-tavern-mobile-dock-toggle-tab { background: rgb(from var(--stage-panel, var(--fk-s-base-bgSolid)) r g b); color: var(--stage-text, var(--fork-ink-2)); border-color: var(--stage-border, var(--fork-hairline)); }
 @media (prefers-reduced-motion: reduce) and (update: none) {
   .dsh-card-stage-layer { opacity: .6; }
 }
@@ -1552,6 +1553,17 @@ body[data-ds-dark-theme] .fork-modal { color-scheme: dark; }
 .fork-format-modal .fork-bubble-preview pre { max-height: none; margin: 0; white-space: pre-wrap; font: 12px/1.6 var(--dsw-font-mono, ui-monospace, monospace); }
 @media (max-width: 720px) {
   .fork-modal { width: 96vw; height: 92vh; }
+}
+.fork-modal.dsh-tavern-candidate-shortcut-modal { width: min(94vw, 34rem); height: auto; min-height: 0; max-height: 88vh; max-height: 88dvh; }
+.dsh-tavern-candidate-shortcut-modal .fork-modal-body { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 10px; padding: 12px 16px 16px; }
+.dsh-tavern-candidate-shortcut-editor { display: grid; gap: 6px; min-width: 0; }
+.dsh-tavern-candidate-shortcut-list { list-style: none; margin: 0; padding: 0; }
+.dsh-tavern-candidate-shortcut-list > li { display: flex; align-items: center; gap: 8px; padding: 5px 0; min-width: 0; border-top: 1px solid var(--fork-hairline); }
+.dsh-tavern-candidate-shortcut-text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tavern-candidate-shortcut-ops { display: flex; flex: none; gap: 2px; }
+@media (pointer: coarse) {
+  .dsh-tavern-candidate-shortcut-ops .dsh-tavern-header-op { width: 36px; height: 36px; }
+  .dsh-tavern-candidate-shortcut-chip, .dsh-tavern-candidate-shortcut-action { min-height: 32px; }
 }
 /* Characters modal: the editor */
 .fork-character-editor { display: grid; gap: 14px; min-width: 0; }
@@ -2563,6 +2575,46 @@ body[data-ds-dark-theme] .fork-popover { color-scheme: dark; }
 /* Dialogs: a neutral dark scrim in both schemes (CanvasText would wash a dark page out to grey). */
 .ap-stage .ap-modal-scrim { background: var(--fk-s-modal-veil); }
 .ap-confirm { width: min(460px, 100%); }
+/* 更新人物卡 / 导入人物卡 (card-update-dialog.js): the house Modal; full screen on a phone with the buttons at the bottom. */
+.ap-modal.fork-card-update { display: flex; flex-direction: column; width: min(540px, 100%); padding: 20px 24px 18px; }
+.fork-card-update > .ap-modal-body { padding: 0; overflow: auto; }
+.fork-card-update-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.fork-card-update-head h2 { margin: 0; font-size: var(--fork-fs-title); font-weight: 600; }
+.fork-card-update-card { display: grid; grid-template-columns: 64px minmax(0, 1fr); column-gap: 16px; row-gap: 4px; align-items: center; }
+.fork-card-update-cover { grid-row: span 3; width: 64px; height: 86px; overflow: hidden; border-radius: 6px; background: var(--fork-hover); }
+.fork-card-update-cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.fork-card-update-name { font-size: var(--fork-fs-heading); font-weight: 600; overflow-wrap: anywhere; }
+.fork-card-update-ver { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; font-size: calc(var(--fork-fs-title) * 1.2); font-weight: 600; font-variant-numeric: tabular-nums; }
+.fork-card-update-ver .is-old, .fork-card-update-ver .is-arrow { color: var(--fork-ink-3); }
+.fork-card-update-ver .is-arrow { font-size: var(--fork-fs-heading); }
+.fork-card-update-file { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; color: var(--fork-ink-2); font-size: var(--fork-fs-meta); overflow-wrap: anywhere; }
+.fork-card-update-loading { display: flex; align-items: center; gap: 8px; margin: 22px 0 0; padding-top: 18px; border-top: 1px solid var(--fork-hairline); color: var(--fork-ink-2); }
+.fork-card-update-packs { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--fork-hairline); }
+.fork-card-update-packs h3 { display: flex; align-items: baseline; gap: 6px; margin: 0 0 12px; font-size: var(--fork-fs-body); font-weight: 600; }
+.fork-card-update-count { color: var(--fork-ink-3); font-weight: 400; }
+.ap-segmented.fork-card-update-way { display: flex; }
+.ap-segmented.fork-card-update-way > button { flex: 1; }
+.fork-card-update-packs .ap-pack-list { margin-top: 12px; }
+.fork-card-update-packs .ap-pack-row:last-child { border-bottom: 0; }
+.fork-card-update-removed { margin-top: 14px; padding: 12px 14px; border-radius: var(--fork-radius); background: var(--fork-hover); }
+.fork-card-update-removed p { display: flex; align-items: baseline; gap: 8px; margin: 0; }
+.fork-card-update-warn { color: var(--fork-warn); }
+.fork-card-update-removed ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0 22px; padding: 0; list-style: none; }
+.fork-card-update-removed li { padding: 2px 9px; border-radius: 999px; background: var(--fork-surface); color: var(--fork-ink-2); font-size: var(--fork-fs-meta); }
+.fork-card-update-done { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 18px 0 4px; text-align: center; }
+.fork-card-update-check { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--fork-accent-soft); color: var(--fork-accent); font-size: var(--fork-fs-title); }
+.fork-card-update-done strong { font-size: calc(var(--fork-fs-title) * 1.1); font-weight: 600; overflow-wrap: anywhere; }
+.fork-card-update-done ul { margin: 0; padding: 0; list-style: none; color: var(--fork-ink-2); font-size: var(--fork-fs-meta); }
+.fork-card-update-error { margin: 14px 0 0; color: var(--fork-warn); }
+.ap-actions.fork-card-update-foot { margin-top: 22px; }
+.ap-ui button.fork-card-update-quiet { border-color: transparent; background: none; color: var(--fork-accent); }
+@media (max-width: 720px) {
+  .ap-modal-scrim:has(> .fork-card-update) { padding: 0; }
+  .ap-modal.fork-card-update { width: 100%; height: 100%; max-height: 100dvh; padding: 18px 18px 16px; border: 0; border-radius: 0; }
+  .fork-card-update > .ap-modal-body { flex: 1; min-height: 0; }
+  .ap-actions.fork-card-update-foot { flex-wrap: nowrap; margin-top: auto; padding-top: 16px; }
+  .ap-actions.fork-card-update-foot > button { flex: 1; min-height: 40px; }
+}
 .ap-confirm-extra { color: var(--fork-ink-2); font-size: var(--fork-fs-body); }
 .ap-ui button.ap-danger-text { border-color: transparent; color: var(--ap-error); }
 .ap-busy { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; color: var(--ap-ink-3); font-size: var(--fork-fs-meta); }
@@ -5191,6 +5243,9 @@ body.dsh-tavern-shell-active [data-sidebar-right-panel="fullscreen"][data-sideba
 .ap-vx-set { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; justify-items: start; gap: 0 20px; margin-top: 10px; padding-bottom: 12px; font-size: var(--fork-fs-body); }
 .ap-vx-set-label { display: flex; align-items: center; min-height: 34px; color: var(--fork-ink-2); }
 .ap-vx-set > .ap-popover-anchor { margin-left: -6px; }
+.ap-vx-model { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-left: -6px; }
+.ap-ui .ap-vx-model button.ap-link { color: var(--fork-accent); font-size: var(--fork-fs-meta); }
+.ap-ui .ap-vx-model button.ap-link:hover:not(:disabled) { background: var(--fork-hover); color: var(--fork-accent); }
 .ap-vx-set > .ap-slider { width: 100%; max-width: 340px; }
 .ap-vx-set > .ap-vx-param-text { width: 100%; }
 .ap-vx-add-foot { display: flex; align-items: center; gap: 14px; padding: 12px 20px 14px 24px; border-top: 1px solid var(--fork-hairline); }
@@ -6375,7 +6430,7 @@ body.dsh-tavern-shell-active [data-sidebar-right-panel="fullscreen"][data-sideba
     .dsh-tavern-gallery-row,
     .dsh-tavern-panel-tabs,
     body.dsh-tavern-shell-active :is([data-phase] > header, [data-slot="conversation.header"] > header) [class*="_tabs"],
-    body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]) [role="dialog"]:has(> nav[class*="_nav"]) > nav,
+    :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > nav,
     .fork-cg-gallery-strip,
     .fork-gal-config[data-layout="compact"] .fork-gal-config-tabs
   ) {
@@ -6782,36 +6837,3 @@ body.dsh-tavern-shell-active [data-sidebar-right-panel] [data-dockkit-tab-title]
 .ap-cast-voice-sum.is-quiet { color: var(--fork-ink-3); }
 .ap-cast-voice-go { display: inline-flex; flex: none; color: var(--fork-ink-3); cursor: pointer; }
 .ap-cast-voice-go .ap-glyph { width: 14px; height: 14px; }
-
-/* 设置 › 叙事阻尼器 */
-.dsh-tavern-damper-key-actions,
-.dsh-tavern-damper-key-edit,
-.dsh-tavern-damper-test { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.dsh-tavern-damper-status { color: var(--dsw-alias-label-secondary); font-size: 13px; }
-.dsh-tavern-damper-test-badge { font-size: 12px; line-height: 1.4; }
-.dsh-tavern-damper-test-badge.is-ok { color: var(--dsw-static-green-600, #238636); }
-.dsh-tavern-damper-test-badge.is-error { color: var(--dsh-tavern-accent-error, #c64545); }
-
-/* 剧情罗盘 › 推演模型快捷选择区：左对齐双列控件卡片 */
-.dsh-tavern-compass-model-editor { container-type: inline-size; }
-.dsh-tavern-compass-model-editor .dsh-tavern-model-row { display: block; margin: 0; padding: 0; border: 0; cursor: default; }
-.dsh-tavern-compass-model-editor .dsh-tavern-model-row > .dsh-tavern-settings-copy { display: none; }
-.dsh-tavern-compass-model-editor .dsh-tavern-settings-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, 132px); gap: 8px; width: 100%; align-items: center; }
-.dsh-tavern-compass-model-editor .dsh-tavern-settings-control > .dsh-tavern-settings-note { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--dsh-tavern-accent-error, #c64545); }
-.dsh-tavern-compass-model-editor .fork-inline-field { display: block; min-width: 0; min-height: 0; }
-.dsh-tavern-compass-model-editor .fork-inline-value { display: block; margin: 0; width: 100%; }
-.dsh-tavern-compass-model-editor .fork-inline-anchor { display: flex; width: 100%; max-width: 100%; }
-.dsh-tavern-compass-model-editor .fork-inline-field button.fork-inline-trigger:not([data-fi-a]):not([data-fi-b]):not([data-fi-c]):not([data-fi-d]) {
-  width: 100%; height: auto; min-height: 34px; padding: 6px 10px;
-  border: 1px solid color-mix(in srgb, var(--fork-ink) 24%, transparent); border-radius: 8px;
-  background: var(--dsw-alias-bg-base); box-shadow: none; justify-content: space-between;
-  font-size: 12.5px; color: var(--fork-ink); text-align: left;
-}
-.dsh-tavern-compass-model-editor .fork-inline-field button.fork-inline-trigger:not([data-fi-a]):not([data-fi-b]):not([data-fi-c]):not([data-fi-d]):hover:not(:disabled) {
-  background: var(--fork-hover); border-color: var(--fork-accent);
-}
-.dsh-tavern-compass-model-editor .fork-inline-field button.fork-inline-trigger:disabled { opacity: 0.5; cursor: default; }
-.dsh-tavern-compass-model-editor .fork-inline-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@container (max-width: 300px) {
-  .dsh-tavern-compass-model-editor .dsh-tavern-settings-control { grid-template-columns: minmax(0, 1fr); }
-}

@@ -5,6 +5,7 @@ import { createImportContextPreparation, needsImportContextPreparation } from '.
 import { createStoryCompactionRequest, nativelyRetainedRounds, retainRecentStoryRounds, storyVolumeMerge, storyVolumePlan, usesStoryCompaction } from '../domain/story-compaction.js'
 import { installCompactionRequestProjection } from '../domain/compaction-request.js'
 import { installPrefixBoundReasoningProjection } from '../domain/prefix-bound-reasoning.js'
+import { omitEmptyProviderContent } from '../domain/provider-message-content.js'
 import { installWorkspaceInstructionPresentation } from '../domain/workspace-instruction-presentation.js'
 import { presentModelError } from '../domain/model-error-presentation.js'
 import { markRequestHandled, requestHandledBy } from '../domain/request-lineage.js'
@@ -174,23 +175,6 @@ export function registerModelStreamHooks({
         const direct = await pluginBodyGeneration.direct(session, options.signal)
         if (direct) { yield * direct; return }
       }
-      const baseDirective = options.purpose === undefined ? toolProtocolDirectiveOf(options) : null
-      const activeModel = str(options.model || baseDirective?.model)
-      const activeDirective = baseDirective
-        ? Object.freeze({
-            ...baseDirective,
-            provider: str(options.provider || baseDirective.provider),
-            model: activeModel,
-            forceToolChoice: baseDirective.storyOutputToolCall === true && !isAutoToolOnlyModel(activeModel),
-            ...(Array.isArray(options.tools)
-              ? {
-                  allowedToolNames: options.tools
-                    .map(tool => str(tool?.name))
-                    .filter(name => name !== '' && name !== STORY_CONTEXT_TOOL_NAME)
-                }
-              : {})
-          })
-        : null
       // a director already owns frozen, projected sources.
       const director = backgroundContext?.task === 'stage-director'
       if (director) assertFrozenStageRequest(backgroundContext, options)
@@ -207,6 +191,12 @@ export function registerModelStreamHooks({
       // Agents a plugin creates under a game are not Tavern's own sessions; log them
       // as that game's background requests so 完整上下文 can show them.
       const child = options.purpose === undefined && !backgroundContext && !chat ? await gameChildSession(sessionId) : null
+      // Templates can erase text after the history projection. Check the final
+      // Tavern request before recording it or starting the downstream stream.
+      if (chat || backgroundContext || child || requestHandledBy(options, 'compaction-projection')) {
+        const cleaned = omitEmptyProviderContent(options)
+        if (cleaned !== options) { yield * ctx.llm.stream(cleaned); return }
+      }
       if (!director && !requestHandledBy(options, 'plugin-request-rewriter') && requestRewriters?.active) {
         const scope = options.purpose === 'compaction' ? 'compaction'
           : backgroundContext ? 'background'
@@ -237,6 +227,23 @@ export function registerModelStreamHooks({
           }
         }
       }
+      const baseDirective = options.purpose === undefined ? toolProtocolDirectiveOf(options) : null
+      const activeModel = str(options.model || baseDirective?.model)
+      const activeDirective = baseDirective
+        ? Object.freeze({
+            ...baseDirective,
+            provider: str(options.provider || baseDirective.provider),
+            model: activeModel,
+            forceToolChoice: baseDirective.storyOutputToolCall === true && !isAutoToolOnlyModel(activeModel),
+            ...(Array.isArray(options.tools)
+              ? {
+                  allowedToolNames: options.tools
+                    .map(tool => str(tool?.name))
+                    .filter(name => name !== '' && name !== STORY_CONTEXT_TOOL_NAME)
+                }
+              : {})
+          })
+        : null
       let requestRecord = null
       if (child) requestRecord = await modelRequestLog.record({ chat: child.chat, context: child.context, coordinates: {}, options })
       // Dev diagnostics: the summary request actually sent (after routing and story projection).
@@ -389,7 +396,7 @@ export function registerModelStreamHooks({
         if (!exhausted && iterator?.return) void Promise.resolve().then(() => iterator.return()).catch(() => {})
         progress('end')
         const completed = !failure && !options.signal?.aborted && finish && finish.kind !== 'error' && finish.kind !== 'aborted'
-        replyObserver?.finish(completed)
+        replyObserver?.finish(completed, completed && finish.kind === 'stop')
         foregroundStrategies.completeRequest(options, completed)
         const owner = child ? child.chat : chat
         if (owner && requestRecord) {

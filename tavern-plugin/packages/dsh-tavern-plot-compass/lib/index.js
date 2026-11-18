@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 import {
+  normalizePlotCompassStrength,
   plotCompassBodyText,
   plotCompassCandidateText,
   plotCompassCompactionNote,
+  plotCompassSettlementNote,
   plotCompassWorldbookScanText,
   readPlotCompass
 } from './plot-compass.js'
@@ -41,6 +43,7 @@ function normalizeGlobalDefaults(raw) {
   return {
     version: 1,
     enabled: typeof src.enabled === 'boolean' ? src.enabled : false,
+    strength: normalizePlotCompassStrength(src.strength),
     autoUpdateInterval: interval,
     modelSelection: normalizePlotCompassModel(src.modelSelection) || 'background'
   }
@@ -71,7 +74,10 @@ export function apply(ctx, options = {}) {
   const plannerPrompt = typeof options?.prompt === 'string' ? options.prompt : loadDefaultPrompt()
   const gameLocks = new Map()
   const gameCache = new Map()
+  const knownGameIds = new Set()
   let globalCache = null
+  let globalReadInflight = null
+  let hasExplicitGlobalModel = false
   let syncingGameSettings = false
 
   function serializeGame(gameId, work) {
@@ -83,30 +89,65 @@ export function apply(ctx, options = {}) {
 
   async function readDefaults() {
     if (globalCache) return globalCache
-    let raw = null
-    try {
-      if (typeof tavern.readPluginData === 'function') raw = await tavern.readPluginData()
-    } catch {
-      raw = null
-    }
-    const payload = raw && typeof raw === 'object' && raw.data !== undefined ? raw.data : raw
-    globalCache = normalizeGlobalDefaults(payload)
-    return globalCache
+    if (globalReadInflight) return globalReadInflight
+    globalReadInflight = (async () => {
+      let raw = null
+      let readable = false
+      try {
+        if (typeof tavern.readPluginData === 'function') {
+          raw = await tavern.readPluginData()
+          readable = true
+        } else {
+          readable = true
+        }
+      } catch {
+        raw = null
+        readable = false
+      }
+      const payload = raw && typeof raw === 'object' && raw.data !== undefined ? raw.data : raw
+      if (payload && typeof payload === 'object' && !Array.isArray(payload) && normalizePlotCompassModel(payload.modelSelection)) {
+        hasExplicitGlobalModel = true
+      }
+      const normalized = normalizeGlobalDefaults(payload)
+      if (readable) globalCache = normalized
+      return normalized
+    })().finally(() => {
+      globalReadInflight = null
+    })
+    return globalReadInflight
   }
 
-  async function saveDefaults(patch = {}) {
+  async function saveDefaults(patch = {}, { broadcastExcept = '' } = {}) {
     const prev = await readDefaults()
+    const modelChanged = patch && typeof patch === 'object' && patch.modelSelection !== undefined
+    if (modelChanged && normalizePlotCompassModel(patch.modelSelection)) {
+      hasExplicitGlobalModel = true
+    }
     const next = normalizeGlobalDefaults({ ...prev, ...patch })
     globalCache = next
     try {
       if (typeof tavern.savePluginData === 'function') await tavern.savePluginData({ data: next })
     } catch {}
+    if (modelChanged) {
+      const skip = str(broadcastExcept)
+      for (const gid of knownGameIds) {
+        if (gid && gid !== skip) void publishCompassState(gid)
+      }
+    }
     return next
+  }
+
+  async function saveGlobalModel(model, gameId) {
+    const id = str(gameId)
+    if (id) knownGameIds.add(id)
+    const saved = await saveDefaults({ modelSelection: model })
+    return saved.modelSelection
   }
 
   async function readGame(gameId) {
     const id = str(gameId)
     if (!id) return normalizeGameRecord(null, await readDefaults())
+    knownGameIds.add(id)
     if (gameCache.has(id)) return structuredClone(gameCache.get(id))
     const defaults = await readDefaults()
     let raw = null
@@ -116,6 +157,9 @@ export function apply(ctx, options = {}) {
       raw = null
     }
     const payload = raw && typeof raw === 'object' && raw.data !== undefined ? raw.data : raw
+    const legacyModel = !hasExplicitGlobalModel && payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? normalizePlotCompassModel(payload.modelSelection)
+      : null
     let record = normalizeGameRecord(payload, defaults)
     if (!payload && typeof tavern.getGameSettings === 'function') {
       try {
@@ -129,6 +173,9 @@ export function apply(ctx, options = {}) {
       } catch {}
     }
     gameCache.set(id, record)
+    if (legacyModel && legacyModel !== 'background') {
+      await saveDefaults({ modelSelection: legacyModel }, { broadcastExcept: id })
+    }
     return structuredClone(record)
   }
 
@@ -164,16 +211,20 @@ export function apply(ctx, options = {}) {
     if (!id || typeof tavern.publishState !== 'function') return
     try {
       const [record, turn] = await Promise.all([readGame(id), latestTurnOf(id)])
+      const defaults = await readDefaults()
       await tavern.publishState({
         gameId: id,
         name: 'compass',
-        data: service.viewState(record, id, turn)
+        data: service.viewState(record, id, turn, defaults.modelSelection)
       })
     } catch {}
   }
 
   async function resolveModel(gameId, record) {
-    const spec = normalizePlotCompassModel(record?.modelSelection) || 'background'
+    const defaults = await readDefaults()
+    const spec = normalizePlotCompassModel(defaults?.modelSelection)
+      || normalizePlotCompassModel(record?.modelSelection)
+      || 'background'
     if (typeof spec === 'object') return spec
     if (spec === 'foreground' && typeof tavern.foregroundModel === 'function') {
       try {
@@ -338,7 +389,12 @@ export function apply(ctx, options = {}) {
   }
 
   const service = createPlotCompassService({
-    store: { readGame, updateGame },
+    store: {
+      readGame,
+      updateGame,
+      readModel: async () => (await readDefaults()).modelSelection,
+      saveModel: saveGlobalModel
+    },
     contextReader,
     promptText: () => plannerPrompt,
     resolveModel,
@@ -349,6 +405,26 @@ export function apply(ctx, options = {}) {
 
   // ── 提示词与世界书扩展点 ──────────────────────────────────────────
   if (typeof tavern.turnSection === 'function') {
+    let supportsLastPosition = false
+    try {
+      keep(tavern.turnSection({
+        name: 'plot-compass-director',
+        position: 'last',
+        target: 'story',
+        async text({ gameId } = {}) {
+          if (!gameId) return ''
+          const record = await readGame(gameId)
+          if (!record.enabled) return ''
+          const compass = readPlotCompass(record.compass)
+          if (compass.strength === 'soft') return ''
+          return plotCompassBodyText(compass)
+        }
+      }))
+      supportsLastPosition = true
+    } catch {
+      supportsLastPosition = false
+    }
+
     keep(tavern.turnSection({
       name: 'plot-compass',
       position: 'after',
@@ -357,7 +433,21 @@ export function apply(ctx, options = {}) {
         if (!gameId) return ''
         const record = await readGame(gameId)
         if (!record.enabled) return ''
-        return plotCompassBodyText(record.compass)
+        const compass = readPlotCompass(record.compass)
+        if (supportsLastPosition && compass.strength !== 'soft') return ''
+        return plotCompassBodyText(compass)
+      }
+    }))
+  }
+
+  if (typeof tavern.settlementSection === 'function') {
+    keep(tavern.settlementSection({
+      name: 'plot-compass',
+      async text({ gameId } = {}) {
+        if (!gameId) return ''
+        const record = await readGame(gameId)
+        if (!record.enabled) return ''
+        return plotCompassSettlementNote(record)
       }
     }))
   }
@@ -430,6 +520,7 @@ export function apply(ctx, options = {}) {
       service.clearMemory(id)
       gameCache.delete(id)
       gameLocks.delete(id)
+      knownGameIds.delete(id)
     }))
   }
 
@@ -491,7 +582,8 @@ export function apply(ctx, options = {}) {
   handle('plot-compass:state', async ({ gameId } = {}) => {
     if (!gameId) return { ok: false, error: '缺少 gameId' }
     const [record, turn] = await Promise.all([readGame(gameId), latestTurnOf(gameId)])
-    return { ok: true, ...service.viewState(record, gameId, turn) }
+    const defaults = await readDefaults()
+    return { ok: true, ...service.viewState(record, gameId, turn, defaults.modelSelection) }
   })
 
   handle('plot-compass:set-enabled', async ({ gameId, enabled } = {}) => {
@@ -539,8 +631,13 @@ export function apply(ctx, options = {}) {
     return { ok: true, plotCompass }
   })
 
-  handle('plot-compass:set-preferences', async ({ gameId, pace, blindBox, customDirective, autoUpdateInterval } = {}) => {
-    const plotCompass = await service.setPreferences({ gameId, pace, blindBox, customDirective, autoUpdateInterval })
+  handle('plot-compass:set-goal', async ({ gameId, text, horizon, enabled } = {}) => {
+    const plotCompass = await service.setGoal({ gameId, text, horizon, enabled })
+    return { ok: true, plotCompass }
+  })
+
+  handle('plot-compass:set-preferences', async ({ gameId, strength, pace, blindBox, customDirective, autoUpdateInterval, goal } = {}) => {
+    const plotCompass = await service.setPreferences({ gameId, strength, pace, blindBox, customDirective, autoUpdateInterval, goal })
     return { ok: true, plotCompass }
   })
 

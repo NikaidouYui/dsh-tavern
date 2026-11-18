@@ -33,16 +33,22 @@ const PC_HORIZON_META = Object.freeze([
   }
 ])
 
+const PC_STRENGTH_OPTIONS = Object.freeze([
+  { key: 'soft', label: '软铺垫', title: '仅作氛围与风声软引导（常规位置注入），不主动打断当前自由对话' },
+  { key: 'guided', label: '强牵引', title: '置底导演级引导（默认）：回应玩家的同时借在场角色或环境契机实质性推进目标节拍' },
+  { key: 'strict', label: '硬性兑现', title: '置底必达裁定：除主角物理受困或明确反向掀桌外，本轮必须正面促成或引爆当前目标节拍' }
+])
+
 const PC_PACE_OPTIONS = Object.freeze([
-  { key: 'foreshadow', label: '只铺垫', title: '侧重氛围感官、暗流铺垫与可逆试探，本轮暂不急着引爆拐点' },
-  { key: 'natural', label: '自然推进', title: '顺应角色性格与现场因果自然向前推进（默认）' },
-  { key: 'climax', label: '尽快引爆', title: '提高戏剧张力，推动当前节拍或篇章冲突正面对撞' }
+  { key: 'foreshadow', label: '只铺垫', title: '侧重前兆感官、试探交锋与悬念蓄势，本轮把局面推至临界点而留白最终摊牌' },
+  { key: 'natural', label: '自然推进', title: '顺应角色性格与现场因果把当前目标节拍扎实演透（默认）' },
+  { key: 'climax', label: '尽快引爆', title: '拉满戏剧张力，推动当前节拍或潜藏冲突在本轮正面对撞' }
 ])
 
 const PC_MODEL_OPTIONS = Object.freeze([
-  { key: 'background', label: '跟随后台', title: '使用本局或全局后台模型' },
-  { key: 'foreground', label: '跟随前台', title: '使用当前对话前台模型' },
-  { key: 'independent', label: '独立', title: '单独为剧情罗盘指定独立模型' }
+  { key: 'background', label: '跟随后台', title: '全局使用当前对话或全局后台模型（所有对话共用）' },
+  { key: 'foreground', label: '跟随前台', title: '全局使用当前对话前台模型（所有对话共用）' },
+  { key: 'independent', label: '独立', title: '为剧情罗盘指定全局独立模型（所有对话共用）' }
 ])
 
 const PC_AUTO_UPDATE_PRESETS = Object.freeze([
@@ -52,11 +58,41 @@ const PC_AUTO_UPDATE_PRESETS = Object.freeze([
   { value: 10, label: '每 10 楼' }
 ])
 
+const PC_GOAL_HORIZON_OPTIONS = Object.freeze([
+  {
+    key: 'shortTerm',
+    label: '短期',
+    span: '2–5 轮',
+    placeholder: '输入短期目标结果（2–5 轮内达成，如：本幕内说服苏晚交出残图并暂时结盟）',
+    hint: '短期目标（2–5 轮）：后续生成的近期所有分支路线都将殊途同归导向达成此结果，中长期路线以此结果为既定起点顺延。',
+    title: '短期目标（2–5 轮）：近期所有路线直接导向达成此结果，中长期路线以此为起点顺延'
+  },
+  {
+    key: 'midTerm',
+    label: '中期',
+    span: '5–20 轮',
+    placeholder: '输入中期目标结果（5–20 轮篇章达成，如：在武林大会揭穿盟主伪善面目并全身而退）',
+    hint: '中期目标（5–20 轮）：短期路线作为先导阶梯为其铺垫蓄势，中期所有篇章路线均收束达成此结果，长期以此为基石顺延。',
+    title: '中期目标（5–20 轮）：短期路线为其铺垫蓄势，中期所有篇章路线汇聚达成此结果'
+  },
+  {
+    key: 'longTerm',
+    label: '长期',
+    span: '终局结果',
+    placeholder: '输入长期目标结果（20+ 轮至终局达成，如：查明当年灭门真相，携手重开北岭山门）',
+    hint: '长期目标（20+ 轮至终局）：短中期路线层层铺路搭桥，长期所有终局蓝图均导向达成此目标结果（严禁生成背离该结局的分支）。',
+    title: '长期目标（20+ 轮至终局）：短中期路线层层铺路，长期所有终局蓝图均导向达成此目标结果'
+  }
+])
+
 function pcEmptyCompass() {
   return {
+    strength: 'guided',
     pace: 'natural',
+    stalledTurns: 0,
     blindBox: false,
     customDirective: '',
+    goal: { enabled: false, horizon: 'shortTerm', text: '' },
     autoUpdateInterval: 0,
     playArchetypes: [],
     customArchetypes: [],
@@ -68,6 +104,19 @@ function pcEmptyCompass() {
     archived: [],
     chatHistory: [],
     basedOnTurn: 0
+  }
+}
+
+function pcActiveGoal(compass) {
+  const goal = compass && compass.goal
+  if (!goal || typeof goal !== 'object' || !goal.enabled || !String(goal.text || '').trim()) return null
+  const opt = PC_GOAL_HORIZON_OPTIONS.find(item => item.key === goal.horizon) || PC_GOAL_HORIZON_OPTIONS[0]
+  return {
+    enabled: true,
+    horizon: opt.key,
+    horizonLabel: opt.label,
+    span: opt.span,
+    text: String(goal.text).trim()
   }
 }
 
@@ -227,9 +276,12 @@ function PlotCompassComposerDock({ ui, gameId, sessionId }) {
   const task = state.plotCompassTask || {}
   const isRunning = task.status === 'running'
   const active = pcActiveCompassSummary(compass)
+  const activeGoal = pcActiveGoal(compass)
+  const hasActiveAnchor = Boolean(active.any || activeGoal)
   const totalRoutes = (compass.shortTerm?.length || 0) + (compass.midTerm?.length || 0) + (compass.longTerm?.length || 0)
 
   const titleParts = []
+  if (activeGoal) titleParts.push('目标〔' + activeGoal.horizonLabel + '〕：' + activeGoal.text)
   if (active.shortTerm) titleParts.push('今期：' + active.shortTerm.title)
   if (active.midTerm) titleParts.push('中期：' + active.midTerm.title)
   if (active.longTerm) titleParts.push('长期：' + active.longTerm.title)
@@ -237,21 +289,23 @@ function PlotCompassComposerDock({ ui, gameId, sessionId }) {
   const title = isRunning
     ? '正在推演今期/中期/长期多路线剧情规划…'
     : titleParts.length > 0
-      ? '当前锚定路线 — ' + titleParts.join(' ｜ ') + '（点击打开剧情罗盘）'
+      ? '当前剧情罗盘导向 — ' + titleParts.join(' ｜ ') + '（点击打开剧情罗盘）'
       : '打开剧情罗盘：查看或推演今期、中期、长期多路线剧情灵感'
 
   const label = isRunning
     ? '罗盘推演中…'
     : active.any
       ? '罗盘 · ' + (active.any.tag || active.any.title)
-      : totalRoutes > 0
-        ? '剧情罗盘 (' + totalRoutes + ')'
-        : '剧情罗盘'
+      : activeGoal
+        ? '罗盘 · 🎯' + activeGoal.horizonLabel
+        : totalRoutes > 0
+          ? '剧情罗盘 (' + totalRoutes + ')'
+          : '剧情罗盘'
 
   return h('div', { className: 'dsh-tavern-compass-composer-wrap' },
     h('button', {
       type: 'button',
-      className: 'dsh-tavern-btn dsh-tavern-compass-dock-btn' + (active.any ? ' is-pinned' : '') + (isRunning ? ' is-running' : ''),
+      className: 'dsh-tavern-btn dsh-tavern-compass-dock-btn' + (hasActiveAnchor ? ' is-pinned' : '') + (isRunning ? ' is-running' : ''),
       title,
       'aria-label': title,
       onClick: () => {
@@ -278,15 +332,20 @@ function PlotCompassComposerTool({ ui, sessionId, busy }) {
   const task = state.plotCompassTask || {}
   const isRunning = task.status === 'running'
   const active = pcActiveCompassSummary(compass)
+  const activeGoal = pcActiveGoal(compass)
+  const hasActiveAnchor = Boolean(active.any || activeGoal)
   const totalRoutes = (compass.shortTerm?.length || 0) + (compass.midTerm?.length || 0) + (compass.longTerm?.length || 0)
   const routes = totalRoutes > 0 ? ' · ' + totalRoutes + ' 条路线' : ''
+  const goalHint = activeGoal ? ' · 目标〔' + activeGoal.horizonLabel + '〕：' + activeGoal.text : ''
   const label = active.any
-    ? '剧情罗盘 · 已锚定' + (active.any.tag || active.any.title) + routes
-    : '剧情罗盘' + routes
+    ? '剧情罗盘 · 已锚定' + (active.any.tag || active.any.title) + goalHint + routes
+    : activeGoal
+      ? '剧情罗盘' + goalHint + routes
+      : '剧情罗盘' + routes
 
   return h('button', {
     type: 'button',
-    className: 'dsh-tavern-compass-tool-btn' + (active.any ? ' is-pinned' : '') + (isRunning ? ' is-running' : ''),
+    className: 'dsh-tavern-compass-tool-btn' + (hasActiveAnchor ? ' is-pinned' : '') + (isRunning ? ' is-running' : ''),
     title: label,
     'aria-label': label,
     'data-busy': busy === true ? 'true' : undefined,
@@ -297,7 +356,7 @@ function PlotCompassComposerTool({ ui, sessionId, busy }) {
     }
   },
     isRunning ? h(PcSpinner) : h('span', { 'aria-hidden': 'true', className: 'dsh-tavern-compass-tool-glyph' }, '🧭'),
-    active.any && !isRunning ? h('span', { className: 'dsh-tavern-compass-tool-dot', 'aria-hidden': 'true' }) : null
+    hasActiveAnchor && !isRunning ? h('span', { className: 'dsh-tavern-compass-tool-dot', 'aria-hidden': 'true' }) : null
   )
 }
 
@@ -311,6 +370,7 @@ function PlotCompassStatusSection({ ui, gameId }) {
   }
   const compass = state.plotCompass || pcEmptyCompass()
   const active = pcActiveCompassSummary(compass)
+  const activeGoal = pcActiveGoal(compass)
   const task = state.plotCompassTask || {}
 
   return h('div', { className: 'dsh-tavern-compass-status-box' },
@@ -321,8 +381,9 @@ function PlotCompassStatusSection({ ui, gameId }) {
           : (compass.basedOnTurn > 0 ? '状态：已开启（基于第 ' + compass.basedOnTurn + ' 轮）' : '状态：已开启，尚未推演'))
         : '状态：本局未开启剧情罗盘'
     ),
-    state.enabled && active.count > 0
+    state.enabled && (active.count > 0 || activeGoal)
       ? h('div', { className: 'dsh-tavern-compass-funnel-items' },
+          activeGoal ? h('span', { className: 'dsh-tavern-compass-funnel-chip is-goal' }, '🎯 ' + activeGoal.horizonLabel + '目标：' + activeGoal.text) : null,
           active.shortTerm ? h('span', { className: 'dsh-tavern-compass-funnel-chip' }, '今期：' + active.shortTerm.title) : null,
           active.midTerm ? h('span', { className: 'dsh-tavern-compass-funnel-chip' }, '中期：' + active.midTerm.title) : null,
           active.longTerm ? h('span', { className: 'dsh-tavern-compass-funnel-chip' }, '长期：' + active.longTerm.title) : null
@@ -349,6 +410,9 @@ function PlotCompassPanel({ ui, gameId }) {
   const [editingArchetypes, setEditingArchetypes] = useState(false)
   const [archetypeDraft, setArchetypeDraft] = useState('')
   const [selectedArchetypes, setSelectedArchetypes] = useState([])
+  const [editingGoal, setEditingGoal] = useState(false)
+  const [goalHorizonDraft, setGoalHorizonDraft] = useState('shortTerm')
+  const [goalTextDraft, setGoalTextDraft] = useState('')
   const [editingDirective, setEditingDirective] = useState(false)
   const [directiveDraft, setDirectiveDraft] = useState('')
   const [peekedCards, setPeekedCards] = useState({})
@@ -373,8 +437,19 @@ function PlotCompassPanel({ ui, gameId }) {
   const task = state.plotCompassTask || { status: 'idle', scope: 'all', error: '' }
   const isRunning = task.status === 'running'
   const active = pcActiveCompassSummary(compass)
+  const rawGoal = compass.goal && typeof compass.goal === 'object'
+    ? compass.goal
+    : { enabled: false, horizon: 'shortTerm', text: '' }
+  const savedGoalText = String(rawGoal.text || '').trim()
+  const hasSavedGoal = Boolean(savedGoalText)
+  const savedGoalHorizonOpt = PC_GOAL_HORIZON_OPTIONS.find(opt => opt.key === rawGoal.horizon) || PC_GOAL_HORIZON_OPTIONS[0]
+  const activeGoal = pcActiveGoal(compass)
+  const goalDraftHorizonOpt = PC_GOAL_HORIZON_OPTIONS.find(opt => opt.key === goalHorizonDraft) || PC_GOAL_HORIZON_OPTIONS[0]
   const hasAnyRoutes = (compass.shortTerm?.length || 0) > 0 || (compass.midTerm?.length || 0) > 0 || (compass.longTerm?.length || 0) > 0
+  const currentStrength = PC_STRENGTH_OPTIONS.some(opt => opt.key === compass.strength) ? compass.strength : 'guided'
+  const currentStrengthOption = PC_STRENGTH_OPTIONS.find(opt => opt.key === currentStrength) || PC_STRENGTH_OPTIONS[1]
   const currentPace = compass.pace || 'natural'
+  const stalledTurns = Math.max(0, Number(compass.stalledTurns) || 0)
   const blindBox = compass.blindBox === true
   const customDirective = String(compass.customDirective || '')
   const autoUpdateInterval = Number.isInteger(Number(compass.autoUpdateInterval)) && Number(compass.autoUpdateInterval) >= 0
@@ -396,6 +471,7 @@ function PlotCompassPanel({ ui, gameId }) {
     setLocalError('')
     setLocalNotice('')
     setEditingArchetypes(false)
+    setEditingGoal(false)
     setEditingDirective(false)
     setConfirmingFresh(false)
     setPeekedCards({})
@@ -433,7 +509,7 @@ function PlotCompassPanel({ ui, gameId }) {
       if (activeEffect) setModelReasoning({ key: compassModelKey, value: null, error: String(err && err.message || err) })
     })
     return () => { activeEffect = false }
-  }, [ui, compassEnabled, compassModelKey, sessionId])
+  }, [ui, compassEnabled, compassModelKey])
 
   useEffect(() => {
     if (chatHistory.length > 0 && task.scope === 'chat') {
@@ -446,14 +522,15 @@ function PlotCompassPanel({ ui, gameId }) {
   }, [customDirective, sessionId])
 
   async function saveCompassModel(nextModel, message) {
-    if (!sessionId || busyAction) return
+    if (busyAction) return
     setBusyAction('model')
     setLocalError('')
     setLocalNotice('')
     try {
       const res = await pcCall(ui, 'plot-compass:set-model', { gameId: sessionId, model: nextModel })
-      if (res.modelSelection) {
-        setState(prev => ({ ...prev, modelSelection: res.modelSelection }))
+      const savedModel = res.modelSelection || res.plotCompassModel
+      if (savedModel) {
+        setState(prev => ({ ...prev, modelSelection: savedModel }))
       }
       await refresh()
       setPickingIndependentModel(false)
@@ -571,7 +648,9 @@ function PlotCompassPanel({ ui, gameId }) {
       const res = await pcCall(ui, 'plot-compass:pin', { gameId: sessionId, horizon, routeId: route.id })
       if (res.plotCompass) setState(prev => ({ ...prev, plotCompass: res.plotCompass }))
       await refresh()
-      setLocalNotice(wasPinned ? '已取消锚定「' + route.title + '」' : '已点亮「' + route.title + '」，将在后续候选与正文中软引导铺垫。')
+      setLocalNotice(wasPinned
+        ? '已取消锚定「' + route.title + '」'
+        : '已点亮「' + route.title + '」，将按「' + currentStrengthOption.label + '」力度牵引后续正文与候选项。')
     } catch (err) {
       setLocalError(String(err && err.message || err))
     } finally {
@@ -694,6 +773,98 @@ function PlotCompassPanel({ ui, gameId }) {
         return
       }
       setLocalNotice(finalTags.length ? '已锁定游玩类型标签：' + finalTags.join('、') : '已恢复自动识别游玩类型')
+    } catch (err) {
+      setLocalError(String(err && err.message || err))
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  function openGoalEditor() {
+    const initialHorizon = hasSavedGoal
+      ? savedGoalHorizonOpt.key
+      : (PC_GOAL_HORIZON_OPTIONS.some(opt => opt.key === activeHorizon) ? activeHorizon : 'shortTerm')
+    setGoalHorizonDraft(initialHorizon)
+    setGoalTextDraft(savedGoalText)
+    setEditingGoal(true)
+  }
+
+  async function saveGoal(andRegenerate) {
+    if (!sessionId || busyAction) return
+    const trimmed = String(goalTextDraft || '').trim()
+    if (!trimmed) {
+      setLocalError('请先填写目标结果内容')
+      return
+    }
+    setBusyAction('goal')
+    setLocalError('')
+    setLocalNotice('')
+    try {
+      const opt = PC_GOAL_HORIZON_OPTIONS.find(item => item.key === goalHorizonDraft) || PC_GOAL_HORIZON_OPTIONS[0]
+      const res = await pcCall(ui, 'plot-compass:set-goal', {
+        gameId: sessionId,
+        text: trimmed,
+        horizon: opt.key,
+        enabled: true
+      })
+      if (res.plotCompass) setState(prev => ({ ...prev, plotCompass: res.plotCompass }))
+      setEditingGoal(false)
+      await refresh()
+      if (andRegenerate && !isRunning) {
+        setBusyAction('')
+        setActiveHorizon(opt.key)
+        await runGenerate(
+          'all',
+          '玩家已设定「' + opt.label + '」目标导向：「' + trimmed + '」。请围绕该目标结果生成并收束今期、中期、长期整棵剧情树，确保所有分支路线最终导向达成该目标结果。'
+        )
+        return
+      }
+      setLocalNotice('已开启「' + opt.label + '」目标导向，后续生成的剧情树与正文推进将导向此结果。')
+    } catch (err) {
+      setLocalError(String(err && err.message || err))
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  async function toggleGoalEnabled(nextEnabled) {
+    if (!sessionId || busyAction || !hasSavedGoal) return
+    setBusyAction('goalToggle')
+    setLocalError('')
+    setLocalNotice('')
+    try {
+      const res = await pcCall(ui, 'plot-compass:set-goal', {
+        gameId: sessionId,
+        enabled: Boolean(nextEnabled)
+      })
+      if (res.plotCompass) setState(prev => ({ ...prev, plotCompass: res.plotCompass }))
+      await refresh()
+      setLocalNotice(nextEnabled
+        ? '已恢复「' + savedGoalHorizonOpt.label + '」目标导向，后续生成的剧情树将导向所设目标。'
+        : '已暂停目标导向，恢复自由发散推演（目标内容已保留）。')
+    } catch (err) {
+      setLocalError(String(err && err.message || err))
+    } finally {
+      setBusyAction('')
+    }
+  }
+
+  async function clearGoal() {
+    if (!sessionId || busyAction) return
+    setBusyAction('goalClear')
+    setLocalError('')
+    setLocalNotice('')
+    try {
+      const res = await pcCall(ui, 'plot-compass:set-goal', {
+        gameId: sessionId,
+        text: '',
+        enabled: false
+      })
+      if (res.plotCompass) setState(prev => ({ ...prev, plotCompass: res.plotCompass }))
+      setGoalTextDraft('')
+      setEditingGoal(false)
+      await refresh()
+      setLocalNotice('已清除目标导向，恢复多结局自由发散模式。')
     } catch (err) {
       setLocalError(String(err && err.message || err))
     } finally {
@@ -829,6 +1000,9 @@ function PlotCompassPanel({ ui, gameId }) {
             route.causalBasis && horizon !== 'longTerm' ? h('p', { className: 'dsh-tavern-compass-meta-line is-causal' },
               h('strong', null, '因果依据：'), route.causalBasis
             ) : null,
+            horizon === 'shortTerm' && route.sceneTrigger ? h('p', { className: 'dsh-tavern-compass-meta-line is-subtle', title: '仅在对话空转时供正文参考的破冰引子，不限制候选与正文的临场演法' },
+              h('strong', null, '破冰参考：'), route.sceneTrigger
+            ) : null,
             horizon === 'midTerm' && route.entryHook ? h('div', { className: 'dsh-tavern-compass-callout' },
               h('strong', null, '入线契机：'),
               h('span', null, route.entryHook)
@@ -947,7 +1121,11 @@ function PlotCompassPanel({ ui, gameId }) {
         )
       : h('div', { className: 'dsh-tavern-status-body dsh-tavern-compass-body' },
           confirmingFresh ? h('div', { className: 'dsh-tavern-compass-confirm', role: 'dialog', 'aria-label': '确认全新生成' },
-            h('span', null, '全新生成会作废当前盘面上的今期 / 中期 / 长期全部路线和点亮标记，模型也看不到这些旧内容，只会依据当前剧情重新推演一套独立方向。已归档的历史记录会保留。确定继续？'),
+            h('span', null,
+              '全新生成会作废当前盘面上的今期 / 中期 / 长期全部路线和点亮标记，模型也看不到这些旧内容，只会依据当前剧情重新推演一套独立方向。' +
+              (activeGoal ? '当前开启的「' + activeGoal.horizonLabel + '目标导向」会保留，新生成的剧情树仍将导向该目标结果。' : '已归档的历史记录会保留。') +
+              '确定继续？'
+            ),
             h('div', { className: 'dsh-tavern-compass-confirm-actions' },
               h('button', { type: 'button', className: 'dsh-tavern-btn', onClick: () => setConfirmingFresh(false) }, '取消'),
               h('button', { type: 'button', className: 'dsh-tavern-btn primary', disabled: Boolean(busyAction), onClick: () => runGenerate('all', undefined, { fresh: true }) }, '全新生成')
@@ -1012,7 +1190,146 @@ function PlotCompassPanel({ ui, gameId }) {
               )
             ) : null,
 
+            editingGoal
+              ? h('div', { className: 'dsh-tavern-compass-goal-editor', role: 'region', 'aria-label': '目标导向设置' },
+                  h('div', { className: 'dsh-tavern-compass-goal-horizon-bar', role: 'group', 'aria-label': '目标时间跨度' },
+                    h('span', { className: 'dsh-tavern-compass-label' }, '目标导向：'),
+                    h('div', { className: 'dsh-tavern-compass-pace-pills' }, PC_GOAL_HORIZON_OPTIONS.map(opt => {
+                      const selected = goalDraftHorizonOpt.key === opt.key
+                      return h('button', {
+                        key: opt.key,
+                        type: 'button',
+                        className: 'dsh-tavern-compass-pace-btn' + (selected ? ' is-active' : ''),
+                        disabled: Boolean(busyAction),
+                        'aria-pressed': selected ? 'true' : 'false',
+                        title: opt.title,
+                        onClick: () => setGoalHorizonDraft(opt.key)
+                      }, opt.label + ' (' + opt.span + ')')
+                    }))
+                  ),
+                  h('input', {
+                    type: 'text',
+                    className: 'dsh-tavern-compass-input',
+                    'aria-label': '目标结果内容',
+                    maxLength: 300,
+                    placeholder: goalDraftHorizonOpt.placeholder,
+                    value: goalTextDraft,
+                    disabled: Boolean(busyAction),
+                    onChange: e => setGoalTextDraft(e.target.value),
+                    onKeyDown: e => {
+                      if (e.key === 'Enter' && !e.isComposing && goalTextDraft.trim()) {
+                        e.preventDefault()
+                        saveGoal(!isRunning)
+                      }
+                    }
+                  }),
+                  h('p', { className: 'dsh-tavern-compass-desc' }, goalDraftHorizonOpt.hint),
+                  h('div', { className: 'dsh-tavern-compass-editor-actions' },
+                    h('button', {
+                      type: 'button',
+                      className: 'dsh-tavern-btn primary',
+                      disabled: Boolean(busyAction) || isRunning || !goalTextDraft.trim(),
+                      title: '保存目标导向并立即推演导向该目标结果的整棵剧情树',
+                      onClick: () => saveGoal(true)
+                    }, '保存并推演剧情树'),
+                    h('button', {
+                      type: 'button',
+                      className: 'dsh-tavern-btn',
+                      disabled: Boolean(busyAction) || !goalTextDraft.trim(),
+                      title: '保存目标导向，后续手动推演、自动演进与正文推进均将导向此结果',
+                      onClick: () => saveGoal(false)
+                    }, '仅保存目标'),
+                    hasSavedGoal ? h('button', {
+                      type: 'button',
+                      className: 'dsh-tavern-btn',
+                      disabled: Boolean(busyAction),
+                      onClick: clearGoal
+                    }, '清除目标') : null,
+                    h('button', {
+                      type: 'button',
+                      className: 'dsh-tavern-btn',
+                      disabled: Boolean(busyAction),
+                      onClick: () => setEditingGoal(false)
+                    }, '取消')
+                  )
+                )
+              : hasSavedGoal
+                ? h('div', {
+                    className: 'dsh-tavern-compass-goal-banner' + (rawGoal.enabled ? '' : ' is-paused'),
+                    'aria-label': '当前目标导向'
+                  },
+                    h('div', { className: 'dsh-tavern-compass-goal-banner-head' },
+                      h('div', { className: 'dsh-tavern-compass-goal-banner-badges' },
+                        h('strong', null, '🎯 目标导向'),
+                        h('span', { className: 'dsh-tavern-compass-pill ' + (rawGoal.enabled ? 'is-active' : '') },
+                          savedGoalHorizonOpt.label + ' · ' + savedGoalHorizonOpt.span
+                        ),
+                        !rawGoal.enabled ? h('span', { className: 'dsh-tavern-compass-pill' }, '已暂停') : null
+                      ),
+                      h('div', { className: 'dsh-tavern-compass-goal-banner-actions' },
+                        h('button', {
+                          type: 'button',
+                          className: 'dsh-tavern-compass-link-btn',
+                          disabled: Boolean(busyAction),
+                          onClick: () => toggleGoalEnabled(!rawGoal.enabled)
+                        }, rawGoal.enabled ? '暂停' : '启用'),
+                        h('button', {
+                          type: 'button',
+                          className: 'dsh-tavern-compass-link-btn',
+                          disabled: Boolean(busyAction),
+                          onClick: openGoalEditor
+                        }, '修改'),
+                        h('button', {
+                          type: 'button',
+                          className: 'dsh-tavern-compass-link-btn',
+                          disabled: Boolean(busyAction),
+                          onClick: clearGoal
+                        }, '清除')
+                      )
+                    ),
+                    h('p', { className: 'dsh-tavern-compass-goal-text' }, savedGoalText)
+                  )
+                : h('div', { className: 'dsh-tavern-compass-goal-row' },
+                    h('span', { className: 'dsh-tavern-compass-label' }, '目标导向：'),
+                    h('span', { className: 'dsh-tavern-compass-muted' }, '未设置（默认发散多结局剧情树）'),
+                    h('button', {
+                      type: 'button',
+                      className: 'dsh-tavern-compass-link-btn',
+                      disabled: Boolean(busyAction),
+                      title: '设置短期 / 中期 / 长期目标结果，使后续生成的剧情树全部导向达成该结果',
+                      onClick: openGoalEditor
+                    }, '🎯 设置目标')
+                  ),
+
             compass.situationDigest ? h('p', { className: 'dsh-tavern-compass-digest' }, compass.situationDigest) : null,
+
+            h('div', { className: 'dsh-tavern-compass-prefs-row' },
+              h('div', { className: 'dsh-tavern-compass-pace-group', role: 'group', 'aria-label': '约束力度' },
+                h('span', { className: 'dsh-tavern-compass-label' }, '约束力度：'),
+                h('div', { className: 'dsh-tavern-compass-pace-pills' }, PC_STRENGTH_OPTIONS.map(opt => {
+                  const selected = currentStrength === opt.key
+                  return h('button', {
+                    key: opt.key,
+                    type: 'button',
+                    className: 'dsh-tavern-compass-pace-btn' + (opt.key === 'strict' ? ' is-strict' : '') + (selected ? ' is-active' : ''),
+                    disabled: Boolean(busyAction),
+                    'aria-pressed': selected ? 'true' : 'false',
+                    title: opt.title,
+                    onClick: () => {
+                      if (!selected) savePreferences({ strength: opt.key }, '约束力度已切换为「' + opt.label + '」')
+                    }
+                  }, opt.label)
+                }))
+              ),
+              h('button', {
+                type: 'button',
+                className: 'dsh-tavern-compass-blindbox-toggle' + (blindBox ? ' is-active' : ''),
+                disabled: Boolean(busyAction),
+                'aria-pressed': blindBox ? 'true' : 'false',
+                title: blindBox ? '盲盒防剧透已开启：隐藏路线详情与终局剧透，点击切回明牌' : '开启盲盒防剧透模式：隐藏节拍/终局剧透详情，仅凭标题与预兆风声游玩',
+                onClick: () => savePreferences({ blindBox: !blindBox }, !blindBox ? '已开启盲盒防剧透模式，卡片剧透详情已遮罩。' : '已切回明牌模式。')
+              }, blindBox ? '🎁 盲盒防剧透：开' : '👁 明牌模式')
+            ),
 
             h('div', { className: 'dsh-tavern-compass-prefs-row' },
               h('div', { className: 'dsh-tavern-compass-pace-group', role: 'group', 'aria-label': '推进节奏' },
@@ -1032,14 +1349,13 @@ function PlotCompassPanel({ ui, gameId }) {
                   }, opt.label)
                 }))
               ),
-              h('button', {
+              (active.count === 0 && !activeGoal) ? h('button', {
                 type: 'button',
-                className: 'dsh-tavern-compass-blindbox-toggle' + (blindBox ? ' is-active' : ''),
+                className: 'dsh-tavern-compass-link-btn',
                 disabled: Boolean(busyAction),
-                'aria-pressed': blindBox ? 'true' : 'false',
-                title: blindBox ? '盲盒防剧透已开启：隐藏路线详情与终局剧透，点击切回明牌' : '开启盲盒防剧透模式：隐藏节拍/终局剧透详情，仅凭标题与预兆风声游玩',
-                onClick: () => savePreferences({ blindBox: !blindBox }, !blindBox ? '已开启盲盒防剧透模式，卡片剧透详情已遮罩。' : '已切回明牌模式。')
-              }, blindBox ? '🎁 盲盒防剧透：开' : '👁 明牌模式')
+                title: '直接指定本段剧情的导演微调要求（无需先推演或点亮路线）',
+                onClick: () => setEditingDirective(!editingDirective)
+              }, editingDirective ? '收起微调' : (customDirective ? '✏️ 已设微调引导' : '✏️ 微调引导')) : null
             ),
 
             h('div', { className: 'dsh-tavern-compass-interval-row' },
@@ -1117,7 +1433,7 @@ function PlotCompassPanel({ ui, gameId }) {
                       }
                       setPickingIndependentModel(false)
                       if (compassModelMode !== opt.key) {
-                        saveCompassModel(opt.key, '剧情罗盘模型已切换为「' + opt.label + '」。')
+                        saveCompassModel(opt.key, '剧情罗盘推演模型已切换为「' + opt.label + '」（全局生效）。')
                       }
                     }
                   }, opt.label)
@@ -1139,7 +1455,7 @@ function PlotCompassPanel({ ui, gameId }) {
                     onChange: e => {
                       const val = e.target.value
                       if (!val) return
-                      saveCompassModel(JSON.parse(val), '已切换剧情罗盘独立模型。')
+                      saveCompassModel(JSON.parse(val), '已切换剧情罗盘独立模型（全局生效）。')
                     }
                   },
                     !compassModelIsObject ? h('option', { value: '' }, catalogLoading ? '正在加载模型…' : '选择独立模型') : null,
@@ -1160,7 +1476,7 @@ function PlotCompassPanel({ ui, gameId }) {
                     onChange: e => {
                       const next = { provider: compassModel.provider, model: compassModel.model }
                       if (e.target.value) next.reasoningEffort = e.target.value
-                      saveCompassModel(next, '已更新剧情罗盘推理强度。')
+                      saveCompassModel(next, '已更新剧情罗盘推理强度（全局生效）。')
                     }
                   },
                     h('option', { value: '' }, '模型默认'),
@@ -1259,31 +1575,45 @@ function PlotCompassPanel({ ui, gameId }) {
             )
           ),
 
-          active.count > 0 ? h('section', { className: 'dsh-tavern-compass-funnel', 'aria-label': '当前锚定漏斗' },
+          (active.count > 0 || activeGoal || editingDirective || customDirective) ? h('section', { className: 'dsh-tavern-compass-funnel', 'aria-label': '当前激活方向' },
             h('div', { className: 'dsh-tavern-compass-funnel-head' },
-              h('strong', null, '🧭 当前激活方向'),
+              h('div', { className: 'dsh-tavern-compass-card-badges' },
+                h('strong', null, (active.count > 0 || activeGoal) ? '🧭 当前激活方向' : '🧭 剧情微调引导'),
+                (active.count > 0 || activeGoal) ? h('span', {
+                  className: 'dsh-tavern-compass-pill ' + (currentStrength === 'strict' ? 'is-warn' : 'is-active')
+                }, currentStrengthOption.label) : null,
+                active.shortTerm && currentStrength !== 'soft' && stalledTurns >= 2 ? h('span', {
+                  className: 'dsh-tavern-compass-pill is-warn',
+                  title: '当前点亮的今期节拍已连续 ' + stalledTurns + ' 轮未达成，下轮将自动加强破局推力'
+                }, '⚡ 停滞 ' + stalledTurns + ' 轮·加压中') : null
+              ),
               h('div', { className: 'dsh-tavern-compass-funnel-actions' },
                 h('button', {
                   type: 'button',
                   className: 'dsh-tavern-compass-link-btn',
                   disabled: Boolean(busyAction),
-                  title: '在不重推路线的前提下，补充或微调前台正文软引导的侧重点',
+                  title: '在不重推路线的前提下，补充或微调前台正文导演引导的侧重点',
                   onClick: () => setEditingDirective(!editingDirective)
                 }, editingDirective ? '收起微调' : (customDirective ? '✏️ 已设微调引导' : '✏️ 微调引导')),
-                ui && typeof ui.regenerateCandidates === 'function' ? h('button', {
+                (active.count > 0 || activeGoal) && ui && typeof ui.regenerateCandidates === 'function' ? h('button', {
                   type: 'button',
                   className: 'dsh-tavern-btn',
                   disabled: Boolean(busyAction),
-                  title: '按当前罗盘路线重新生成下一步行动候选项（带路线角标）',
+                  title: '按当前罗盘路线与目标导向重新生成下一步行动候选项（带路线角标）',
                   onClick: refreshCandidatesFromCompass
                 }, busyAction === 'candidates' ? '提交中…' : '生成联动候选项') : null
               )
             ),
-            h('div', { className: 'dsh-tavern-compass-funnel-items' },
+            (active.count > 0 || activeGoal) ? h('div', { className: 'dsh-tavern-compass-funnel-items' },
+              activeGoal ? h('span', {
+                className: 'dsh-tavern-compass-funnel-chip is-goal',
+                title: '点击查看对应跨度路线',
+                onClick: () => setActiveHorizon(activeGoal.horizon)
+              }, '🎯 ' + activeGoal.horizonLabel + '目标：' + activeGoal.text) : null,
               active.shortTerm ? h('span', { className: 'dsh-tavern-compass-funnel-chip', onClick: () => setActiveHorizon('shortTerm') }, '今期：' + active.shortTerm.title) : null,
               active.midTerm ? h('span', { className: 'dsh-tavern-compass-funnel-chip', onClick: () => setActiveHorizon('midTerm') }, '中期：' + active.midTerm.title) : null,
               active.longTerm ? h('span', { className: 'dsh-tavern-compass-funnel-chip', onClick: () => setActiveHorizon('longTerm') }, '长期：' + active.longTerm.title) : null
-            ),
+            ) : null,
             (editingDirective || customDirective) ? h('div', { className: 'dsh-tavern-compass-directive-box' },
               editingDirective
                 ? h('div', { className: 'dsh-tavern-compass-directive-edit' },
@@ -1291,7 +1621,7 @@ function PlotCompassPanel({ ui, gameId }) {
                       type: 'text',
                       className: 'dsh-tavern-compass-input',
                       maxLength: 240,
-                      placeholder: '微调后台软引导语气或侧重点（如：本段多给对话交锋与误会，先别点破真相）',
+                      placeholder: '微调导演引导语气或侧重点（如：本段多给对话交锋与误会，先别点破真相）',
                       value: directiveDraft,
                       onChange: e => setDirectiveDraft(e.target.value),
                       onKeyDown: e => {
@@ -1325,8 +1655,8 @@ function PlotCompassPanel({ ui, gameId }) {
             h('div', { className: 'dsh-tavern-compass-alert-left' },
               h(PcSpinner),
               h('span', null, task.scope === 'chat'
-                ? '脑暴灵感助手正在结合人设、现场定格与世界书暗线构思回复…'
-                : '后台正在结合人物卡、变量状态与世界书暗线推演' + (task.scope === 'shortTerm' ? '今期' : task.scope === 'midTerm' ? '中期' : task.scope === 'longTerm' ? '长期' : '今期 / 中期 / 长期') + '路线…（不影响继续对话）')
+                ? '脑暴灵感助手正在结合人设、现场定格' + (activeGoal ? '与' + activeGoal.horizonLabel + '目标导向' : '与世界书暗线') + '构思回复…'
+                : '后台正在' + (activeGoal ? '围绕「' + activeGoal.horizonLabel + '目标导向」' : '结合人物卡、变量状态与世界书暗线') + '推演' + (task.scope === 'shortTerm' ? '今期' : task.scope === 'midTerm' ? '中期' : task.scope === 'longTerm' ? '长期' : '今期 / 中期 / 长期') + '路线…（不影响继续对话）')
             )
           ) : null,
           task.status === 'failed' && task.error ? h('div', { className: 'dsh-tavern-compass-alert is-error', role: 'alert' },
@@ -1341,23 +1671,28 @@ function PlotCompassPanel({ ui, gameId }) {
               const selected = meta.key === activeHorizon
               const count = Array.isArray(compass[meta.key]) ? compass[meta.key].length : 0
               const hasPin = Boolean(compass.pinned && compass.pinned[meta.key])
+              const isGoalHorizon = Boolean(activeGoal && activeGoal.horizon === meta.key)
               return h('button', {
                 key: meta.key,
                 type: 'button',
                 role: 'tab',
                 'aria-selected': selected ? 'true' : 'false',
                 tabIndex: selected ? 0 : -1,
-                className: 'dsh-tavern-compass-tab' + (selected ? ' is-active' : '') + (hasPin ? ' has-pin' : ''),
+                className: 'dsh-tavern-compass-tab' + (selected ? ' is-active' : '') + (hasPin ? ' has-pin' : '') + (isGoalHorizon ? ' is-goal-target' : ''),
                 onClick: () => setActiveHorizon(meta.key)
               },
-                h('span', { className: 'dsh-tavern-compass-tab-title' }, (hasPin ? '★ ' : '') + meta.label),
+                h('span', { className: 'dsh-tavern-compass-tab-title' }, (isGoalHorizon ? '🎯 ' : '') + (hasPin ? '★ ' : '') + meta.label),
                 h('small', null, count > 0 ? meta.span + ' · ' + count : meta.span)
               )
             })
           ),
 
           h('div', { className: 'dsh-tavern-compass-section-bar' },
-            h('p', { className: 'dsh-tavern-compass-desc' }, activeMeta.subtitle),
+            h('p', { className: 'dsh-tavern-compass-desc' },
+              activeGoal && activeGoal.horizon === activeHorizon
+                ? '🎯 当前层级已锁定目标导向，所有路线将殊途同归导向所设结果'
+                : activeMeta.subtitle
+            ),
             hasAnyRoutes && !isRunning ? h('button', {
               type: 'button',
               className: 'dsh-tavern-compass-link-btn',
@@ -1371,8 +1706,12 @@ function PlotCompassPanel({ ui, gameId }) {
             : !isRunning
               ? h('div', { className: 'dsh-tavern-compass-empty' },
                   h('p', null, '尚未生成' + activeMeta.label + '路线规划。'),
-                  h('p', { className: 'dsh-tavern-compass-desc' }, '点击上方「✦ 推演多路线」，AI 将基于本卡题材玩法、已埋伏笔与未触发的世界书暗线，提供多条截然不同的近/中/长期发展路线供你挑选灵感或一键分叉试玩。'),
-                  h('button', { type: 'button', className: 'dsh-tavern-btn primary', disabled: Boolean(busyAction), onClick: () => runGenerate('all') }, '✦ 立即推演今期 / 中期 / 长期路线')
+                  h('p', { className: 'dsh-tavern-compass-desc' },
+                    activeGoal
+                      ? '已设置「' + activeGoal.horizonLabel + '」目标导向。点击下方按钮，AI 将结合当前剧情、人物卡与世界书暗线，推演出整棵导向该目标结果的多分支剧情树。'
+                      : '点击上方「✦ 推演多路线」，AI 将基于本卡题材玩法、已埋伏笔与未触发的世界书暗线，提供多条截然不同的近/中/长期发展路线供你挑选灵感或一键分叉试玩。'
+                  ),
+                  h('button', { type: 'button', className: 'dsh-tavern-btn primary', disabled: Boolean(busyAction), onClick: () => runGenerate('all') }, activeGoal ? '✦ 立即推演目标导向剧情树' : '✦ 立即推演今期 / 中期 / 长期路线')
                 )
               : null,
 

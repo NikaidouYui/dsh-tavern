@@ -517,41 +517,6 @@ body.dsh-tavern-picker-open #auto-message-notification-container { visibility: h
 }
 .dsh-tavern-picker-group { margin-top: 10px; color: var(--dsw-alias-label-secondary); font-size: 11px; font-weight: 700; }
 .dsh-tavern-picker-foot { position: sticky; bottom: -10px; display: flex; justify-content: flex-end; margin: 10px -10px -10px; padding: 10px; border-top: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-specific-sidebar-fill); }
-.dsh-tavern-card-update { align-self: center; flex: none; height: fit-content; min-height: 0; display: flex; flex-direction: column; width: min(600px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); box-sizing: border-box; overflow: hidden; border: 1px solid var(--dsw-alias-border-l2); border-radius: 18px; background: var(--dsw-specific-sidebar-fill); box-shadow: 0 24px 80px #0003; color: var(--dsw-alias-label-primary); font-size: 14px; line-height: 1.6; }
-.dsh-tavern-card-update-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 24px 26px 0; }
-.dsh-tavern-card-update-label { display: block; color: var(--dsw-alias-label-secondary); font-size: 12px; }
-.dsh-tavern-card-update h2 { margin: 3px 0 0; font-size: 22px; font-weight: 650; letter-spacing: -.5px; }
-.dsh-tavern-card-update-body { padding: 18px 26px 24px; overflow-y: auto; min-height: 0; }
-.dsh-tavern-card-update-description { margin: 0 0 18px; color: var(--dsw-alias-label-secondary); font-size: 13px; }
-.dsh-tavern-card-update-versions { display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr); gap: 12px; align-items: center; margin-bottom: 20px; }
-.dsh-tavern-card-update-version { min-width: 0; padding: 16px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: color-mix(in srgb, var(--dsw-alias-border-l2) 14%, transparent); }
-.dsh-tavern-card-update-version:last-child { border-color: var(--dsh-tavern-accent-border); background: var(--dsh-tavern-accent-soft); }
-.dsh-tavern-card-update-version strong { display: block; margin: 5px 0; font-size: 25px; line-height: 1.3; font-weight: 650; overflow-wrap: anywhere; }
-.dsh-tavern-card-update-name { display: block; overflow-wrap: anywhere; font-size: 12px; color: var(--dsw-alias-label-secondary); }
-.dsh-tavern-card-update-arrow { text-align: center; color: var(--dsw-alias-label-secondary); font-size: 22px; }
-.dsh-tavern-card-update-file { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px dashed var(--dsw-alias-border-l2); border-radius: 12px; }
-.dsh-tavern-card-update-file > div { min-width: 0; }
-.dsh-tavern-card-update-file strong { display: block; font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
-.dsh-tavern-card-update-file span { display: block; margin-top: 4px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
-.dsh-tavern-card-update-file button { flex-shrink: 0; }
-.dsh-tavern-card-update-foot { justify-content: flex-end; display: flex; align-items: center; gap: 10px; padding: 16px 26px; border-top: 1px solid var(--dsw-alias-border-l2); }
-.dsh-tavern-card-update-foot > span { flex: 1; font-size: 12px; color: var(--dsw-alias-label-secondary); }
-.dsh-tavern-card-update-foot button { white-space: nowrap; }
-.dsh-tavern-card-update-success { padding: 15px 17px; border-radius: 12px; background: color-mix(in srgb, #44846b 12%, transparent); }
-.dsh-tavern-card-update-success strong { color: light-dark(#286247, #9bd5b1); }
-.dsh-tavern-card-update-success p { margin: 5px 0 0; font-size: 13px; }
-.dsh-tavern-card-update-backup { margin-top: 16px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
-.dsh-tavern-card-update-backup summary { cursor: pointer; }
-.dsh-tavern-card-update-backup code { display: block; margin-top: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 480px) {
-  .dsh-tavern-card-update-head { padding: 20px 18px 0; }
-  .dsh-tavern-card-update-body { padding: 16px 18px 20px; }
-  .dsh-tavern-card-update-versions { gap: 6px; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr); }
-  .dsh-tavern-card-update-version { padding: 12px; }
-  .dsh-tavern-card-update-version strong { font-size: 21px; }
-  .dsh-tavern-card-update-foot { padding: 14px 18px; flex-wrap: wrap; }
-  .dsh-tavern-card-update-foot > span { flex-basis: 100%; }
-}
 .dsh-tavern-script-file { align-self: center; white-space: nowrap; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); padding: 6px 8px; cursor: pointer; font-size: 11px; }
 .dsh-tavern-script-file:hover { border-color: var(--dsh-tavern-accent); color: var(--dsh-tavern-accent); }
 .dsh-tavern-choice-trigger { border: 1px solid color-mix(in srgb, var(--dsh-tavern-accent) 40%, transparent); background: color-mix(in srgb, var(--dsh-tavern-accent) 10%, transparent); color: var(--dsh-tavern-accent); cursor: pointer; padding: 3px 9px; border-radius: 7px; font-size: 12px; font-weight: 650; }
@@ -560,7 +525,7 @@ body.dsh-tavern-picker-open #auto-message-notification-container { visibility: h
 /* 「接下来的行动」的下移入口：桌面上由收起卡片承担，手机才在操作行里出现。 */
 .dsh-tavern-candidate-entry { display: none; }
 .dsh-tavern-dock-actions-primary { display: contents; }
-.dsh-tavern-mobile-stats-toggle { display: none; }
+.dsh-tavern-mobile-dock-toggle-row { display: none; }
 .dsh-tavern-notice-dismiss { margin-left: 6px; padding: 0 4px; border: 0; background: none; color: inherit; font: inherit; line-height: 1; cursor: pointer; opacity: .7; }
 .dsh-tavern-notice-dismiss:hover { opacity: 1; }
 .dsh-tavern-more-actions { position: relative; }
@@ -655,6 +620,16 @@ body.dsh-tavern-picker-open #auto-message-notification-container { visibility: h
 .dsh-tavern-regen-examples { display: flex; flex: 1 1 200px; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .dsh-tavern-regen-example { padding: 3px 10px; font: inherit; border: 1px solid var(--dsw-alias-border-l2); border-radius: 999px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.6; cursor: pointer; }
 .dsh-tavern-regen-example:hover { border-color: var(--dsh-tavern-accent-border); color: var(--dsh-tavern-accent); background: var(--dsh-tavern-accent-soft); }
+.dsh-tavern-candidate-shortcuts { display: flex; align-items: flex-start; flex-wrap: wrap; width: 100%; min-width: 0; gap: 4px 8px; }
+.dsh-tavern-candidate-shortcut-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; max-height: 6.5rem; padding: 2px; overflow-y: auto; overscroll-behavior: contain; box-sizing: border-box; }
+.dsh-tavern-candidate-shortcut-chip { max-width: min(100%, 18em); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dsh-tavern-candidate-shortcut-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.dsh-tavern-candidate-shortcut-action { padding: 4px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--dsh-tavern-accent-active); font: inherit; font-size: 12px; line-height: 1.6; cursor: pointer; }
+.dsh-tavern-candidate-shortcut-action:hover:not(:disabled) { background: var(--dsh-tavern-accent-soft); }
+.dsh-tavern-candidate-shortcut-action:disabled { opacity: .45; cursor: default; }
+.dsh-tavern-candidate-shortcut-chip:focus-visible, .dsh-tavern-candidate-shortcut-action:focus-visible { outline: 2px solid var(--fork-focus); outline-offset: -2px; }
+.dsh-tavern-candidate-shortcut-note { flex-basis: 100%; margin: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dsh-tavern-candidate-shortcut-note[role="alert"] { color: var(--dsh-tavern-accent-error); }
 .dsh-tavern-regen-cancel { margin-left: auto; padding: 6px 12px; font: inherit; font-size: 14px; border: 0; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
 .dsh-tavern-regen-cancel:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .dsh-tavern-regen-submit { padding: 6px 16px; font: inherit; font-size: 14px; white-space: nowrap; font-weight: 600; }
@@ -2939,7 +2914,7 @@ body.dsh-tavern-shell-active [class*="_tabs"] [class*="_viewsMoreAnchor"] [class
     max-height: var(--dsh-sheet-max, calc(var(--dsh-vv-height, 100dvh) * .6)); overflow-y: auto; overscroll-behavior: contain;
   }
   /* 展开候选时操作集中在候选卡底部；收起即恢复生成与历史入口，减少重复工具条占位。 */
-  html.dsh-tavern-viewport-pinned [data-composer-seat]:has(.dsh-tavern-candidate-question:not(.collapsed)) .dsh-tavern-dock-actions { display: none; }
+  html.dsh-tavern-viewport-pinned [data-composer-seat]:has(.dsh-tavern-candidate-question:not(.collapsed)) :is(.dsh-tavern-dock-actions, .dsh-tavern-mobile-dock-toggle-row) { display: none; }
   /* 候选面板已经占据输入区上方，已展开的运行状态也先让位。 */
   html.dsh-tavern-viewport-pinned [data-composer-seat]:has(.dsh-tavern-candidate-question:not(.collapsed)) [data-composer-dock] { display: none !important; }
   .dsh-tavern-choice-trigger { min-height: 36px; padding: 5px 10px; font-size: 13px; }
@@ -3218,7 +3193,7 @@ body.dsh-tavern-shell-active [class*="_tabs"] [class*="_viewsMoreAnchor"] [class
   .dsh-tavern-assistant { font-size: var(--dsh-content-font-size, 14px); line-height: 1.7; gap: 12px; min-width: 0; overflow-wrap: anywhere; }
   .dsh-tavern-user-bubble { font-size: var(--dsh-content-font-size, 14px); line-height: 1.6; padding: 8px 12px; border-radius: 16px; }
   .dsh-tavern-user-stack { max-width: 90%; }
-  /* 方案 B 的上半层：高频动作留在操作行，窄了横滑、绝不折行；完整运行状态折进右侧箭头。 */
+  /* 方案 B 的上半层：高频动作留在操作行，窄了横滑、绝不折行；运行状态收纳进模型菜单末行。 */
   .dsh-tavern-dock-actions { order: 2; justify-content: flex-start; padding: 0 6px; gap: 2px; flex-wrap: wrap; }
   .dsh-tavern-dock-actions > * { flex-shrink: 0; }
   .dsh-tavern-dock-actions-primary {
@@ -3235,34 +3210,48 @@ body.dsh-tavern-shell-active [class*="_tabs"] [class*="_viewsMoreAnchor"] [class
   .dsh-tavern-dock-actions .dsh-tavern-choice-trigger:is([data-fork-action="choices"], [data-fork-action="choices-again"], [data-fork-action="open-choices"]) {
     background: color-mix(in srgb, var(--dsh-tavern-accent) 10%, transparent); color: var(--dsh-tavern-accent);
   }
-  .dsh-tavern-mobile-stats-toggle {
+  .dsh-tavern-dock-actions[data-mobile-collapsed="true"] { display: none !important; }
+  .dsh-tavern-mobile-dock-toggle-row {
+    order: 3; display: flex; align-items: center; justify-content: center;
+    width: 100%; max-width: var(--dsh-composer-card-max-width, 780px); box-sizing: border-box;
+    height: 16px; margin: -4px auto -3px; pointer-events: none;
+  }
+  .dsh-tavern-mobile-dock-toggle-row:has([aria-expanded="false"]) { margin-top: 0; }
+  .dsh-tavern-mobile-dock-toggle {
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    padding: 0; border: 0; background: transparent; color: var(--dsw-alias-label-secondary);
+    cursor: pointer; pointer-events: auto; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  }
+  .dsh-tavern-mobile-dock-toggle::before { content: ""; position: absolute; inset: -6px -12px; }
+  .dsh-tavern-mobile-dock-toggle:focus-visible { outline: none; }
+  .dsh-tavern-mobile-dock-toggle-tab {
     display: inline-flex; align-items: center; justify-content: center;
-    flex: 0 0 44px; box-sizing: border-box; width: 44px; min-height: 44px; margin-left: 0; padding: 0;
-    border: 0; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; touch-action: manipulation;
+    width: 36px; height: 15px; box-sizing: border-box;
+    border: 1px solid var(--dsw-alias-border-l2); border-radius: 3px 3px 11px 11px;
+    background: var(--dsw-specific-sidebar-fill);
   }
-  .dsh-tavern-mobile-stats-glyph {
-    display: grid; place-items: center; width: 30px; height: 30px; box-sizing: border-box;
-    border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px;
-    background: var(--dsw-specific-sidebar-fill); font: 17px/1 var(--dsw-font-family, sans-serif);
-    transition: transform 160ms ease;
+  .dsh-tavern-mobile-dock-toggle[aria-expanded="false"] .dsh-tavern-mobile-dock-toggle-tab {
+    border-radius: 11px 11px 3px 3px;
   }
-  .dsh-tavern-mobile-stats-toggle:hover { background: transparent; color: var(--dsh-tavern-accent); }
-  .dsh-tavern-mobile-stats-toggle[aria-expanded="true"] .dsh-tavern-mobile-stats-glyph { transform: rotate(180deg); }
-  /* 展开时让宿主 InputBar 的卡片与状态栏参与同一纵向布局，状态卡排在操作行上方。 */
-  [data-composer-seat]:has(.dsh-tavern-mobile-stats-toggle) [class*="_composerStack"] { display: flex; flex-direction: column; }
-  [data-composer-seat]:has(.dsh-tavern-mobile-stats-toggle) [data-slot="conversation.composer.bar"] > :has(> [data-composer-card]) { display: contents; }
-  [data-composer-seat]:has(.dsh-tavern-mobile-stats-toggle) [data-composer-card] { order: 3; }
-  /* 折叠整条宿主状态栏；只藏插槽会留下原生上下文计量，等于没省高度。 */
-  [data-composer-seat]:has(.dsh-tavern-mobile-stats-toggle) [data-composer-dock] { display: none !important; }
-  [data-composer-seat]:has(.dsh-tavern-mobile-stats-toggle[aria-expanded="true"]) [data-composer-dock] {
-    order: 1; display: flex !important; flex-wrap: wrap; align-items: center; gap: 8px 14px; box-sizing: border-box;
-    width: calc(100% - 16px); max-width: var(--dsh-composer-card-max-width, 780px); max-height: min(30dvh, 180px);
-    margin: 0 auto 6px; padding: 11px 12px; overflow-y: auto; overscroll-behavior: contain;
-    border: 1px solid var(--dsw-alias-border-l2); border-radius: 13px; background: var(--dsw-specific-sidebar-fill);
+  .dsh-tavern-mobile-dock-toggle:active .dsh-tavern-mobile-dock-toggle-tab,
+  .dsh-tavern-mobile-dock-toggle:focus-visible .dsh-tavern-mobile-dock-toggle-tab {
+    color: var(--dsh-tavern-accent);
+    border-color: color-mix(in srgb, var(--dsh-tavern-accent) 45%, var(--dsw-alias-border-l2));
   }
-  [data-composer-seat]:has(.dsh-tavern-mobile-stats-toggle[aria-expanded="true"]) [data-slot="conversation.composer.dock"] {
-    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); flex: 1 1 180px; gap: 8px 14px;
+  @media (hover: hover) {
+    .dsh-tavern-mobile-dock-toggle:hover .dsh-tavern-mobile-dock-toggle-tab {
+      color: var(--dsh-tavern-accent);
+      border-color: color-mix(in srgb, var(--dsh-tavern-accent) 45%, var(--dsw-alias-border-l2));
+    }
   }
+  .dsh-tavern-mobile-dock-toggle-icon { display: block; flex-shrink: 0; transition: transform 160ms ease; }
+  .dsh-tavern-mobile-dock-toggle[aria-expanded="false"] .dsh-tavern-mobile-dock-toggle-icon { transform: rotate(180deg); }
+  /* 让宿主 InputBar 的卡片与操作栏参与同一纵向布局，折叠舌头排在操作行与输入卡之间。 */
+  [data-composer-seat]:has(.dsh-tavern-dock-actions, .dsh-tavern-mobile-dock-toggle) [class*="_composerStack"] { display: flex; flex-direction: column; }
+  [data-composer-seat]:has(.dsh-tavern-dock-actions, .dsh-tavern-mobile-dock-toggle) [data-slot="conversation.composer.bar"] > :has(> [data-composer-card]) { display: contents; }
+  [data-composer-seat]:has(.dsh-tavern-dock-actions, .dsh-tavern-mobile-dock-toggle) [data-composer-card] { order: 4; }
+  /* 移动端折叠整条宿主状态栏（移入模型菜单末行）；只藏插槽会留下原生上下文计量，等于没省高度。 */
+  body.dsh-tavern-shell-active [data-composer-seat] [data-composer-dock] { display: none !important; }
   /* 面板窄于屏幕时也允许内容收缩，长名称、代码和下拉选项不能撑开整个页面。 */
   .dsh-tavern-library, .dsh-tavern-status, .dsh-local-settings, .dsh-template-panel,
   .dsh-tavern-settings-section, .dsh-tavern-worldbook-editor { min-width: 0; min-height: 0; }
@@ -3570,35 +3559,35 @@ body.dsh-tavern-shell-active :is([data-sidebar-drawer], :root[data-dsh-app-layou
   :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [data-sidebar-right-panel] [data-dockkit-strip] { padding-left: 48px; }
   :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [data-sidebar-right-mode] { display: none; }
 
-  /* 宿主设置：188px 导航 + 内容的桌面双栏会把内容压成一字一行。 */
-  html:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"][aria-modal="true"]:has(> nav[class*="_nav"]) {
+  /* 宿主设置：188px 导航 + 内容的桌面双栏会把内容压成一字一行。设置浮层渲染在 body 下（不在 frame 内），所以用 body:has(frame) 判断外壳。 */
+  html:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"][aria-modal="true"]:has(> nav[class*="_nav"]) {
     position: fixed !important; top: var(--dsh-vv-top, 0px) !important; left: 0;
     flex-direction: column; width: 100vw; max-width: 100vw;
     height: var(--dsh-vv-height, 100dvh); max-height: var(--dsh-vv-height, 100dvh); border-radius: 0;
     padding-top: var(--dsh-play-top-inset, 0px); box-sizing: border-box;
   }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > nav {
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > nav {
     flex-direction: row; align-items: center; width: auto; gap: 0; padding: 4px 8px 0;
     overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain;
   }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > nav > [class*="_navTitle"] { display: none; }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > nav > [class*="_navList"] { flex-direction: row; gap: 4px; }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > nav [class*="_navCell"] { flex: none; width: auto; white-space: nowrap; }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] { min-height: 0; }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] > [class*="_header"] {
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > nav > [class*="_navTitle"] { display: none; }
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > nav > [class*="_navList"] { flex-direction: row; gap: 4px; }
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > nav [class*="_navCell"] { flex: none; width: auto; white-space: nowrap; }
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] { min-height: 0; }
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] > [class*="_header"] {
     height: auto; align-items: center; padding: 6px 8px 6px 16px;
   }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] > [class*="_header"] > [class*="_actions"] {
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] > [class*="_header"] > [class*="_actions"] {
     flex-wrap: wrap; justify-content: flex-start; margin-left: 0;
   }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] > [class*="_header"] > [class*="_actions"] * { flex-wrap: wrap; }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] > [class*="_header"] > [class*="_actions"] button { width: auto; white-space: nowrap; }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) [class*="_options"] {
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] > [class*="_header"] > [class*="_actions"] * { flex-wrap: wrap; }
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) > [class*="_content"] > [class*="_header"] > [class*="_actions"] button { width: auto; white-space: nowrap; }
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) [class*="_options"] {
     padding: 0 16px max(24px, env(safe-area-inset-bottom, 0px)); overscroll-behavior: contain;
   }
   /* 设置行：说明在左、控件在右；放不下时控件换到下一行，而不是把说明压成竖条。 */
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) [class*="_row"]:has(> [class*="_rowText"]) { flex-wrap: wrap; }
-  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active [data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer]) [role="dialog"]:has(> nav[class*="_nav"]) [class*="_rowText"] { flex: 1 1 160px; padding-right: 0; }
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) [class*="_row"]:has(> [class*="_rowText"]) { flex-wrap: wrap; }
+  :root:not([data-dsh-app-layout="drawer"]) body.dsh-tavern-shell-active:has([data-slot="root"] > [class*="_frame"]:not([data-mobile-nav]):not([data-sidebar-drawer])) [role="dialog"]:has(> nav[class*="_nav"]) [class*="_rowText"] { flex: 1 1 160px; padding-right: 0; }
 }
 
 /* dsh-web-mobile 也会标记桌面 frame，但只有窄触屏才使用 minmax(0, 1fr) 0 0。
@@ -3612,9 +3601,9 @@ body.dsh-tavern-shell-active :is([data-sidebar-drawer], :root[data-dsh-app-layou
   html.dsh-tavern-short-viewport body.dsh-tavern-shell-active [data-composer-seat] {
     --dsh-composer-text-max-height: 48px;
   }
-  html.dsh-tavern-short-viewport [data-composer-seat]:has([data-composer-card] :is(textarea, [contenteditable="true"]):focus) :is(.dsh-tavern-dock-actions, .dsh-tavern-candidate-question.collapsed) { display: none; }
-  /* 键盘弹出时折叠状态的开关也随之隐藏，展开的面板不能继续占用正文高度。 */
-  html.dsh-tavern-short-viewport [data-composer-seat]:has(.dsh-tavern-mobile-stats-toggle):has([data-composer-card] :is(textarea, [contenteditable="true"]):focus) [data-composer-dock] { display: none !important; }
+  html.dsh-tavern-short-viewport [data-composer-seat]:has([data-composer-card] :is(textarea, [contenteditable="true"]):focus) :is(.dsh-tavern-dock-actions, .dsh-tavern-mobile-dock-toggle-row, .dsh-tavern-candidate-question.collapsed) { display: none; }
+  /* 键盘弹出时状态栏也不继续占用正文高度。 */
+  html.dsh-tavern-short-viewport body.dsh-tavern-shell-active [data-composer-seat]:has([data-composer-card] :is(textarea, [contenteditable="true"]):focus) [data-composer-dock] { display: none !important; }
   html.dsh-tavern-short-viewport body.dsh-tavern-shell-active [data-composer-card] :is(textarea, [contenteditable="true"]) { min-height: 24px; }
   html.dsh-tavern-short-viewport body.dsh-tavern-shell-active [data-composer-card] [class*="_row"] { position: sticky; bottom: 0; background: var(--dsw-specific-input-major); }
   html.dsh-tavern-short-viewport body.dsh-tavern-shell-active :is(.dsh-tavern-candidate-question:not(.collapsed), [data-composer-card] [class*="_menu"][role="menu"]) {
@@ -4303,9 +4292,18 @@ button.dsh-tavern-transfer-check:disabled { cursor: default; }
 }
 .dsh-tavern-transfer-file-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
 .dsh-tavern-transfer-file-sub { font-size: 10.5px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }
-.dsh-tavern-transfer-progress { display: flex; flex-direction: column; gap: 4px; padding: 14px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); }
-.dsh-tavern-transfer-progress strong { font-size: 12.5px; }
-.dsh-tavern-transfer-progress span { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dsh-tavern-transfer-chip:disabled { opacity: .5; cursor: default; }
+.dsh-tavern-transfer-progress { display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-base); }
+.dsh-tavern-transfer-progress.is-export-bar { margin: 0 12px 8px; padding: 10px 12px; flex: 0 0 auto; }
+.dsh-tavern-transfer-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.dsh-tavern-transfer-progress strong { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; min-width: 0; }
+.dsh-tavern-transfer-progress > span,
+.dsh-tavern-transfer-progress-sub { font-size: 11px; color: var(--dsw-alias-label-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-tavern-transfer-progress-pct { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--dsh-tavern-accent-active); flex: 0 0 auto; }
+.dsh-tavern-transfer-meter { position: relative; height: 5px; border-radius: 999px; background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); overflow: hidden; }
+.dsh-tavern-transfer-meter-fill { height: 100%; border-radius: inherit; background: var(--dsh-tavern-accent-active); transition: width .24s ease; }
+.dsh-tavern-transfer-meter.is-indeterminate .dsh-tavern-transfer-meter-fill { width: 38%; animation: dsh-tavern-transfer-slide 1.25s ease-in-out infinite; }
+@keyframes dsh-tavern-transfer-slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(270%); } }
 @media (max-width: 520px) {
   .dsh-tavern-transfer-item-note { display: none; }
   .dsh-tavern-transfer-switch { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--dsw-alias-label-secondary); cursor: pointer; }

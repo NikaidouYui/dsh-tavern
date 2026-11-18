@@ -642,6 +642,86 @@ export function replayablePersistedTurn(chat, { events = [], nodes = [] } = {}) 
   return Object.freeze(target)
 }
 
+function activeTailPlayerInputs({ events = [], nodes = [], currentRequestId = '' } = {}) {
+  const activeRpcIds = new Set()
+  const unkeyedTexts = new Map()
+  const reqId = typeof currentRequestId === 'string' ? currentRequestId.trim() : ''
+  if (reqId !== '') activeRpcIds.add(reqId)
+  const addUnkeyed = text => {
+    const trimmed = typeof text === 'string' ? text.trim() : ''
+    if (trimmed !== '') unkeyedTexts.set(trimmed, (unkeyedTexts.get(trimmed) || 0) + 1)
+  }
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    const event = eventAt(events, Number(nodes[index]))
+    if (event?.type === 'assistant/message' && modelSourceOf(event) !== null && !isRollbackAssistantTombstone(event, events)) break
+    if (!event || event.type !== 'user/message' || isRollbackUserTombstone(event)) continue
+    const rpcId = typeof event.data?.source?.rpcId === 'string' ? event.data.source.rpcId.trim() : ''
+    if (rpcId !== '') activeRpcIds.add(rpcId)
+    else if (event.data?.source?.kind === 'user') addUnkeyed(contentText(event.data))
+  }
+  const queues = new Map()
+  for (const event of Array.isArray(events) ? events : []) {
+    if (event?.type !== 'agent/inbox/spliced') continue
+    const target = typeof event.data?.target === 'string' && event.data.target !== '' ? event.data.target : 'next-turn'
+    const queue = queues.get(target) || []
+    const start = Math.max(0, Number(event.data?.start) || 0)
+    const removed = Math.max(0, Number(event.data?.removedCount) || 0)
+    const inserted = Array.isArray(event.data?.inserted) ? event.data.inserted : []
+    queue.splice(start, removed, ...inserted)
+    queues.set(target, queue)
+  }
+  for (const queue of queues.values()) {
+    for (const item of queue) {
+      const rpcId = typeof item?.source?.rpcId === 'string' ? item.source.rpcId.trim() : ''
+      if (rpcId !== '') activeRpcIds.add(rpcId)
+      else if (item?.source?.kind === 'user') addUnkeyed(contentText(item))
+    }
+  }
+  return { activeRpcIds, unkeyedTexts }
+}
+
+// Player inputs persisted to chat.messages on composer submission can outlive a turn
+// that died before step/start (never reaching session.surface) or was cleared from
+// session.surface when the next turn starts. Identify only unanswered native tail user
+// rows absent from both the cleaned surface and live inbox; split-round floors kept
+// after deleting a committed reply carry an explicit positive turn and stay untouched.
+export function supersededTailPlayerInputIndices(messages, options = {}) {
+  const length = Number(messages?.length)
+  if (!Number.isSafeInteger(length) || length <= 0) return []
+  const { activeRpcIds, unkeyedTexts } = activeTailPlayerInputs(options)
+  const indices = []
+  for (let index = length - 1; index >= 0; index -= 1) {
+    const row = messages[index]
+    if (!row || typeof row !== 'object') break
+    if (row.role === 'assistant') {
+      if (row.placeholder !== true) break
+      continue
+    }
+    if (row.role !== 'user' || row.native !== true || row.greeting === true) continue
+    if (Number.isSafeInteger(Number(row.turn)) && Number(row.turn) > 0) continue
+    const rpcId = typeof row.source?.rpcId === 'string' ? row.source.rpcId.trim() : ''
+    if (rpcId !== '' && activeRpcIds.has(rpcId)) continue
+    const text = String(row.sourceText ?? row.text ?? '').trim()
+    const remaining = text !== '' ? (unkeyedTexts.get(text) || 0) : 0
+    if (remaining > 0) {
+      unkeyedTexts.set(text, remaining - 1)
+      continue
+    }
+    indices.push(index)
+  }
+  return indices.sort((a, b) => a - b)
+}
+
+export function pruneSupersededTailPlayerInputs(chat, options = {}) {
+  if (!chat || !Array.isArray(chat.messages)) return 0
+  const indices = supersededTailPlayerInputIndices(chat.messages, options)
+  if (indices.length === 0) return 0
+  const next = [...chat.messages]
+  for (let index = indices.length - 1; index >= 0; index -= 1) next.splice(indices[index], 1)
+  chat.messages = next
+  return indices.length
+}
+
 /** 存档行记着的原生位置就是这一条：投影/修复换了轮号也仍然是这一轮。 */
 export function anchoredToSaveRow(target, row, evidence = null) {
   const anchor = row && row.nativeAnchor
@@ -1138,6 +1218,25 @@ function incompleteReplyTarget(chat, failedTurns) {
   return failedTurn === undefined ? null : { kind: 'failed-tail', turn: failedTurn }
 }
 
+function alreadyShadowedRollbackTarget(chat, latest, events, nodes) {
+  const turn = Number(latest?.turn)
+  const checkpoint = chat.timeline?.checkpoints?.at(-1)
+  if (!Number.isSafeInteger(turn) || turn <= 1 || Number(checkpoint?.turn) !== turn || latest.placeholder || latest.incomplete) return null
+  const resolved = resolveRoundAnchor({ events, nodes }, latest.nativeAnchor)
+  if (!resolved || resolved.input === null || resolved.input !== resolved.reply) return null
+  const index = nodes.indexOf(resolved.reply)
+  if (index < 0 || !isRollbackAssistantTombstone(eventAt(events, resolved.reply), events)) return null
+  // A shared native input can cause an earlier saved round to be shadowed along
+  // with a later regenerated round. Its checkpoint can still restore the save.
+  // A compaction or a newer visible input/reply is a different boundary.
+  const hasNewerStory = nodes.slice(index + 1).some(seq => {
+    const event = eventAt(events, seq)
+    return isCompactionCheckpoint(event) || (event?.type === 'user/message' && isTurnInput(event.data) && !isRollbackUserTombstone(event)) ||
+      (event?.type === 'assistant/message' && modelSourceOf(event) !== null && !isRollbackAssistantTombstone(event, events))
+  })
+  return hasNewerStory ? null : { turn, alreadyShadowed: true }
+}
+
 // UI and mutation share the same native target and failed-tail precedence.
 /** 待回退范围不得覆盖上一条仍需保留的存档消息或其锚定正文。 */
 function targetOverlapsPreviousRow(target, messages, latestIndex, evidence) {
@@ -1163,19 +1262,19 @@ function planRollbackAvailability(chat, { events = [], nodes = [] } = {}) {
   const messages = Array.isArray(planningChat.messages) ? planningChat.messages : []
   const latestIndex = messages.findLastIndex(message => message?.role === 'assistant' && message.greeting !== true)
   const latest = latestIndex >= 0 ? messages[latestIndex] : undefined
+  if (isRescuedHistoryMessage(planningChat, latest)) return { canRollback: false, canClearIncompleteReply: false, failedTurns, target: null, reason: '存档救援导入的历史不可回退，请发送新消息继续' }
   const evidence = { events, nodes }
   const located = locateRollbackSurface({ ...evidence, anchor: latest?.nativeAnchor })
   const target = located && !targetOverlapsPreviousRow(located, messages, latestIndex, evidence) ? located : null
-  if (isRescuedHistoryMessage(planningChat, latest)) return { canRollback: false, canClearIncompleteReply: false, failedTurns, target: null, reason: '存档救援导入的历史不可回退，请发送新消息继续' }
   const turn = Number(latest?.turn)
   const anchorMatches = !validAnchor(latest?.nativeAnchor) || anchoredToSaveRow(target, latest, evidence)
   const matchesTurn = Boolean(target && anchorMatches && (!(turn > 0) || target.turn === turn || target.turn === Number(planningChat.regeneratedDshTurns?.[String(turn)])))
   // 投影/修复写回的正文会带着别的剧情轮号：存档行记着它指的就是这一条，就还是这一轮。
   const matchesAnchor = Boolean(target && !matchesTurn && anchoredToSaveRow(target, latest, evidence))
-  const matches = matchesTurn || matchesAnchor
   const hasMessages = hasRollbackMessages(messages) || Boolean(failedRegen && latest)
-  const canRollback = hasMessages && Boolean(matches)
-  return { canRollback, canClearIncompleteReply: clearIncompleteReplyTarget !== null, clearIncompleteReplyTarget, failedTurns, target: canRollback ? target : null,
+  const rollbackTarget = !hasMessages ? null : matchesTurn || matchesAnchor ? target : alreadyShadowedRollbackTarget(planningChat, latest, events, nodes)
+  const canRollback = rollbackTarget !== null
+  return { canRollback, canClearIncompleteReply: clearIncompleteReplyTarget !== null, clearIncompleteReplyTarget, failedTurns, target: rollbackTarget,
     reason: canRollback ? '' : hasMessages ? '当前轮次已不在可回退的消息流中，请继续发送新消息；历史正文仍保留。' : '当前没有可回退的已提交轮次' }
 }
 

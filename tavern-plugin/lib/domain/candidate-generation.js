@@ -698,7 +698,7 @@ export function createCandidateGenerator(options) {
           logger.error('dsh-tavern: 候选项输出无效:', str(error && error.message || error))
           logger.error('dsh-tavern: 候选项原始输出:', str(text).slice(0, 1200))
         }
-        await taskRun.commit({ stateChanged: false, participant }).catch(function (persistError) {
+        await taskRun.fail(run).catch(function (persistError) {
           if (logger && typeof logger.warn === 'function') logger.warn(`dsh-tavern: 候选输出无效后无法持久化终态：${str(persistError && persistError.message || persistError)}`)
         })
         throw candidateFailure('validating', '候选输出无效', error)
@@ -735,6 +735,9 @@ export function createCandidateGenerator(options) {
           }
         })
       } catch (error) {
+        await taskRun.fail(run).catch(function (persistError) {
+          if (logger && typeof logger.warn === 'function') logger.warn(`dsh-tavern: 候选保存失败后无法持久化终态：${str(persistError && persistError.message || persistError)}`)
+        })
         throw candidateFailure('committing', '候选已经生成，但保存失败', error)
       }
       if (completed.status === 'missing') throw new Error('聊天不存在: ' + chat.id)

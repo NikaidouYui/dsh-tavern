@@ -53,6 +53,23 @@ function cancelUncommittedOperations(operations) {
   }
 }
 
+/** 标记后台参与者会话已被压缩：压缩前的节点序号不可再用作局部回退，统一降级为清空任务历史（-1）。 */
+export function markCompactedParticipant(participant, at = Date.now()) {
+  if (!participant || typeof participant !== 'object') return
+  participant.requiresNewSessionOnRewind = true
+  participant.compactionPlannedAt = at
+  participant.compactedBaseline = true
+  if (participant.status === 'needs-rewind' && Number.isSafeInteger(participant.rewindTo) && participant.rewindTo > -1) {
+    participant.rewindTo = -1
+    participant.boundary = -1
+    participant.formatVersion = 4
+  }
+  if (Number.isSafeInteger(participant.candidateBaseBoundary) && participant.candidateBaseBoundary > -1) {
+    participant.candidateBaseBoundary = -1
+    participant.candidateBaseFormatVersion = 4
+  }
+}
+
 export function createStoryTimeline(options = {}) {
   const makeId = typeof options.id === 'function' ? options.id : function (prefix) { return prefix + '-' + Math.random().toString(36).slice(2) }
   const now = typeof options.now === 'function' ? options.now : Date.now
@@ -291,6 +308,27 @@ export function createStoryTimeline(options = {}) {
     return operationValue(operation)
   }
 
+  function safeParticipantRewind(previous, sessionId, branchId) {
+    if (str(previous.sessionId) !== str(sessionId) || str(previous.branchId) !== str(branchId)) {
+      return { boundary: -1, formatVersion: 4 }
+    }
+    if (previous.compactedBaseline === true) {
+      return { boundary: -1, formatVersion: 4 }
+    }
+    if (previous.status === 'needs-rewind' && Number.isSafeInteger(previous.rewindTo)) {
+      const boundary = previous.rewindTo
+      return { boundary, formatVersion: boundary === -1 ? 4 : (previous.formatVersion || 4) }
+    }
+    if (Number.isSafeInteger(previous.candidateBaseBoundary)) {
+      const boundary = previous.candidateBaseBoundary
+      return { boundary, formatVersion: boundary === -1 ? 4 : (previous.candidateBaseFormatVersion || previous.formatVersion || 4) }
+    }
+    if (previous.status === 'current' && Number.isSafeInteger(previous.boundary)) {
+      return { boundary: previous.boundary, formatVersion: previous.boundary === -1 ? 4 : (previous.formatVersion || 4) }
+    }
+    return { boundary: -1, formatVersion: 4 }
+  }
+
   function participantRequest(chat, role) {
     const participantKey = participantRole(role)
     const current = object(chat.timeline.participants[participantKey])
@@ -299,15 +337,39 @@ export function createStoryTimeline(options = {}) {
       && operation.basedOn.branchId === chat.timeline.branchId
       && operation.basedOn.revision === chat.timeline.revision).at(-1)
     if (current.status === 'current' && current.branchId === chat.timeline.branchId && str(current.sessionId) !== '') {
-      return { role: participantKey, sessionId: current.sessionId, rewindTo: null, lifetime: participantLifetime(current.lifetime), syncedRevision: current.syncedRevision }
+      let rewindTo = null
+      let formatVersion
+      if (Number.isSafeInteger(current.candidateBaseBoundary)) {
+        rewindTo = current.compactedBaseline === true && current.candidateBaseBoundary > -1 ? -1 : current.candidateBaseBoundary
+        formatVersion = rewindTo === -1 ? 4 : (current.candidateBaseFormatVersion || current.formatVersion)
+      }
+      return {
+        role: participantKey,
+        sessionId: current.sessionId,
+        rewindTo,
+        ...(rewindTo !== null && formatVersion ? { formatVersion } : {}),
+        lifetime: participantLifetime(current.lifetime),
+        syncedRevision: current.syncedRevision
+      }
     }
-    if (current.status !== 'needs-rewind' && bound && ['running', 'interrupted', 'failed', 'deferred'].includes(bound.status)) return { role: participantKey, sessionId: bound.startedSessionId, rewindTo: null, lifetime: 'chat', syncedRevision: null }
-    const rewindTo = Number.isSafeInteger(current.rewindTo) ? current.rewindTo : (Number.isSafeInteger(current.boundary) ? current.boundary : null)
+    if (current.status !== 'needs-rewind' && bound && ['running', 'interrupted', 'failed', 'deferred'].includes(bound.status)) {
+      const rewindTo = bound.status === 'deferred' ? null : -1
+      return {
+        role: participantKey,
+        sessionId: bound.startedSessionId,
+        rewindTo,
+        ...(rewindTo !== null ? { formatVersion: 4 } : {}),
+        lifetime: 'chat',
+        syncedRevision: null
+      }
+    }
+    let rewindTo = Number.isSafeInteger(current.rewindTo) ? current.rewindTo : (Number.isSafeInteger(current.boundary) ? current.boundary : null)
+    if (current.compactedBaseline === true && Number.isSafeInteger(rewindTo) && rewindTo > -1) rewindTo = -1
     return {
       role: participantKey,
       sessionId: str(current.sessionId),
       rewindTo,
-      ...(current.formatVersion ? { formatVersion: current.formatVersion } : {}),
+      ...(rewindTo === -1 ? { formatVersion: 4 } : (current.formatVersion ? { formatVersion: current.formatVersion } : {})),
       lifetime: participantKey === 'background' ? participantLifetime(current.lifetime) : (current.lifetime || 'one-shot'),
       syncedRevision: current.syncedRevision === undefined ? null : current.syncedRevision
     }
@@ -329,10 +391,48 @@ export function createStoryTimeline(options = {}) {
     // or failed before its first turn) only carries the session id it found, so marking it
     // synced would make the next candidate generation skip sending the new story.
     const ranSession = str(operation.startedSessionId) !== ''
-    // Failure is not evidence that the requested rewind reached durable storage.
-    // Keep the original boundary so every retry still has to perform it.
-    if (preserveRewind && previousParticipant.status === 'needs-rewind'
-      && previousParticipant.sessionId === participant.sessionId) return
+    if (preserveRewind) {
+      // 未进入后台会话就失败时，保持原本健康的会话状态；已进入会话则必须回退到本次任务前的安全边界。
+      if (!ranSession && str(previousParticipant.sessionId) === str(participant.sessionId)
+        && str(previousParticipant.branchId) === str(chat.timeline.branchId)
+        && ['current', 'needs-rewind'].includes(previousParticipant.status)) {
+        return
+      }
+      if (previousParticipant.status === 'needs-rewind'
+        && str(previousParticipant.sessionId) === str(participant.sessionId)
+        && str(previousParticipant.branchId) === str(chat.timeline.branchId)) {
+        if (previousParticipant.compactedBaseline === true && Number.isSafeInteger(previousParticipant.rewindTo) && previousParticipant.rewindTo > -1) {
+          chat.timeline.participants[participantKey] = {
+            ...previousParticipant, boundary: -1, rewindTo: -1, formatVersion: 4, syncedRevision: null, updatedAt: now()
+          }
+        }
+        return
+      }
+      const safe = safeParticipantRewind(previousParticipant, participant.sessionId, chat.timeline.branchId)
+      const cleared = safe.boundary === -1
+      const nextParticipant = {
+        role: participantKey,
+        lifetime,
+        sessionId: str(participant.sessionId),
+        branchId: chat.timeline.branchId,
+        syncedRevision: null,
+        boundary: safe.boundary,
+        formatVersion: safe.formatVersion,
+        status: 'needs-rewind',
+        rewindTo: safe.boundary,
+        updatedAt: now()
+      }
+      if (!cleared && str(previousParticipant.sessionId) === str(participant.sessionId) && previousParticipant.requiresNewSessionOnRewind === true) {
+        nextParticipant.requiresNewSessionOnRewind = true
+        nextParticipant.compactedAt = Number(previousParticipant.compactedAt) || now()
+      }
+      chat.timeline.participants[participantKey] = nextParticipant
+      return
+    }
+    const isCandidate = operation.role === 'candidate'
+    const candidateBase = isCandidate && ranSession
+      ? safeParticipantRewind(previousParticipant, participant.sessionId, chat.timeline.branchId)
+      : undefined
     const nextParticipant = {
       role: participantKey,
       lifetime,
@@ -341,12 +441,17 @@ export function createStoryTimeline(options = {}) {
       syncedRevision: participant.identityOnly || !ranSession ? null : chat.timeline.revision,
       boundary: Number.isSafeInteger(participant.boundary) ? participant.boundary : null,
       ...(participant.formatVersion ? { formatVersion: participant.formatVersion } : {}),
+      ...(candidateBase !== undefined ? {
+        candidateBaseBoundary: candidateBase.boundary,
+        candidateBaseFormatVersion: candidateBase.formatVersion
+      } : {}),
       status: 'current',
       rewindTo: null,
       updatedAt: now()
     }
     // A full in-place reset (rewindTo -1) removed the compacted history with the rest.
-    const cleared = previousParticipant.status === 'needs-rewind' && previousParticipant.rewindTo === -1
+    const cleared = (previousParticipant.status === 'needs-rewind' && (previousParticipant.rewindTo === -1 || previousParticipant.compactedBaseline === true))
+      || (Number.isSafeInteger(previousParticipant.candidateBaseBoundary) && (previousParticipant.candidateBaseBoundary === -1 || previousParticipant.compactedBaseline === true))
     if (str(previousParticipant.sessionId) === str(participant.sessionId) && previousParticipant.requiresNewSessionOnRewind === true && !cleared) {
       nextParticipant.requiresNewSessionOnRewind = true
       nextParticipant.compactedAt = Number(previousParticipant.compactedAt) || now()
@@ -450,6 +555,9 @@ export function createStoryTimeline(options = {}) {
         && delivery.lifecycleRevision === Number(chat.tavernHelperLifecycleRevision || 0)
       operation.status = recoverable ? 'deferred' : 'interrupted'
       if (recoverable) updateSettlementBackground(chat, operation, 'pending')
+      else if (str(operation.startedSessionId) !== '') {
+        commitParticipant(chat, operation, { sessionId: operation.startedSessionId, lifetime: 'chat' }, true)
+      }
       operation.completedAt = now()
       changed = true
       if (operation.role === 'settlement' && !recoverable) interruptedRole = operation.role
@@ -698,7 +806,13 @@ export function createStoryTimeline(options = {}) {
     }
     const operation = chat.timeline.operations[str(input && input.operationId)]
     if (operation === undefined || operation.status !== 'running' || !sameBasedOn(operation.basedOn, input && input.basedOn) || !basedOnStillCurrent(operation.basedOn, chat)) {
-      if (operation !== undefined && operation.status === 'running') operation.status = 'stale'
+      if (operation !== undefined && operation.status === 'running') {
+        operation.status = 'stale'
+        if (operation.kind === 'agent' && str(operation.startedSessionId) !== ''
+          && str(operation.basedOn?.branchId) === chat.timeline.branchId) {
+          commitParticipant(chat, operation, { sessionId: operation.startedSessionId, lifetime: 'chat' }, true)
+        }
+      }
       return { chat, value: { status: 'stale', branchId: chat.timeline.branchId, revision: chat.timeline.revision } }
     }
     const outcome = object(input && input.outcome)

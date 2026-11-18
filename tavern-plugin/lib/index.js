@@ -300,7 +300,7 @@ import { plainReplyProse } from './domain/reply-prose.js'
 import { createScriptContinuity } from './domain/script-continuity.js'
 import { scriptForState } from './domain/script-layout.js'
 import { appendWritingSkillState } from './domain/skill-visibility.js'
-import { createStoryTimeline } from './domain/story-timeline.js'
+import { createStoryTimeline, markCompactedParticipant } from './domain/story-timeline.js'
 import { resolveTavernDataRoot } from './domain/tavern-data.js'
 import { FileSystemSkillProvider } from '@deepseek-ai/dsh-skill-filesystem'
 import { createTavernSkillProvider } from './domain/tavern-skill-provider.js'
@@ -3704,7 +3704,7 @@ export async function apply(ctx) {
     }),
     markBackground: (id, target, member = 'background') => updateChat(id, chat => {
       const participant = chat.timeline?.participants?.[member]
-      if (participant?.sessionId === target) { participant.requiresNewSessionOnRewind = true; participant.compactionPlannedAt = Date.now() }
+      if (participant?.sessionId === target) markCompactedParticipant(participant)
       return chat
     }, { source: 'compaction.background' }),
     async compact(id, side, options, signal) {
@@ -3785,8 +3785,7 @@ export async function apply(ctx) {
       await updateChat(chat.id, current => {
         const participant = current.timeline?.participants?.[member]
         if (participant?.sessionId !== target.session.id) throw new Error('后台会话已变更，取消旧会话压缩')
-        participant.requiresNewSessionOnRewind = true
-        participant.compactionPlannedAt = Date.now()
+        markCompactedParticipant(participant)
         return current
       }, { source: 'compaction.background' })
     }

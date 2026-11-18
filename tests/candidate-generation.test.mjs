@@ -4,8 +4,9 @@ import test from 'node:test'
 
 import { createCandidateGenerator, extractForegroundStoryChoices, foregroundCandidatePrompt } from '../tavern-plugin/lib/domain/candidate-generation.js'
 import { createScriptContinuity } from '../tavern-plugin/lib/domain/script-continuity.js'
-import { createStoryTimeline } from '../tavern-plugin/lib/domain/story-timeline.js'
+import { createStoryTimeline, markCompactedParticipant } from '../tavern-plugin/lib/domain/story-timeline.js'
 import { createBackgroundTaskCoordinator } from '../tavern-plugin/lib/domain/background-task-coordinator.js'
+import { createBackgroundAgentRunner } from '../tavern-plugin/lib/background-agent-runner.js'
 import { prompt } from '../tavern-plugin/lib/prompt-catalog.js'
 
 const storyChoices = [
@@ -496,4 +497,253 @@ test('自由故事支持按焦点角色优先的多主体分组 + 全局突发�
 
   const saved = await run.candidates.find({ sessionId: 'session-1', messageId: 'message-actors' })
   assert.deepEqual(saved, result)
+})
+
+function createSurfaceSession(id = 'bg-session-1') {
+  const session = {
+    id,
+    header: { version: 4 },
+    events: [],
+    surface: { nodes: [] },
+    append(type, data, intent) {
+      const seq = this.events.length
+      const event = { seq, type, data: structuredClone(data), ...(intent || {}) }
+      this.events.push(event)
+      if (intent?.surfaceOp === 'append') {
+        this.surface.nodes.push(seq)
+      } else if (intent?.surfaceOp && typeof intent.surfaceOp === 'object' && intent.surfaceOp.op === 'replace') {
+        const start = intent.surfaceOp.startSeq ?? intent.surfaceOp.start
+        const end = intent.surfaceOp.endSeq ?? intent.surfaceOp.end
+        const first = this.surface.nodes.findIndex(node => node >= start && node <= end)
+        const remaining = this.surface.nodes.filter(node => node < start || node > end)
+        if (first >= 0) remaining.splice(first, 0, seq)
+        else remaining.push(seq)
+        this.surface.nodes = remaining
+      }
+      return event
+    }
+  }
+  return session
+}
+
+function visibleSurfaceMessages(session) {
+  const list = []
+  for (const seq of session.surface.nodes) {
+    const event = session.events[seq]
+    if (!event) continue
+    if (event.type === 'user/message') {
+      const id = String(event.data?.id || '')
+      if (id.startsWith('tavern-session-prefix:')) {
+        list.push({ role: 'prefix', id, seq })
+      } else {
+        const text = (event.data?.content || []).map(block => block?.text || '').join('')
+        if (text) list.push({ role: 'user', text, seq })
+      }
+    } else if (event.type === 'assistant/message') {
+      const content = event.data?.message?.content || []
+      if (content.length > 0) {
+        list.push({ role: 'assistant', text: content.map(block => block?.text || (block?.type === 'tool-call' ? `[tool:${block.name}]` : '')).join(''), seq })
+      }
+    }
+  }
+  return list
+}
+
+test('候选项生成失败（未调用工具或异常）后重试，以及同选择点再次生成，均不叠加重复的上下文', async () => {
+  const timeline = createStoryTimeline({ id: prefix => prefix + '-' + Math.random().toString(36).slice(2), now: () => 123456 })
+  let chat = timeline.apply({
+    chat: {
+      id: 'chat-1', sessionId: 'parent-1', cardId: 'card-1', mode: 'story',
+      messages: [{ role: 'assistant', turn: 1, text: '第十一月第一个周六，陆婉清提前到了咖啡店。' }],
+      macroState: { userName: '你', local: {}, global: {} }
+    },
+    intent: { kind: 'ensure' }
+  }).chat
+  const store = {
+    async chatForSession() { return structuredClone(chat) },
+    async readChat() { return structuredClone(chat) },
+    async readCard() { return { id: 'card-1', name: '陆婉清', description: '设定文本' } },
+    async readScript() { return undefined },
+    async writeChat(next) { chat = structuredClone(next) },
+    async updateChat(_id, update) {
+      const next = await update(structuredClone(chat))
+      if (next !== undefined) chat = structuredClone(next)
+      return structuredClone(chat)
+    }
+  }
+  const tasks = createBackgroundTaskCoordinator({ store, timeline })
+  const bgSession = createSurfaceSession('background-1')
+  const registered = new Map()
+  const requestSnapshots = []
+  let mode = 'no-tool' // 'no-tool' -> 'error' -> 'tool-ok' -> 'tool-ok-2'
+  let work = Promise.resolve()
+
+  const runner = createBackgroundAgentRunner({
+    id: () => bgSession.id,
+    resolveStablePrefix: () => 'CARD_FIXED_PREFIX',
+    resolveCurrentWorldbook: () => '',
+    backgroundTools: [{ name: 'posture_submit', parameters: { type: 'object' } }, { name: 'candidate_submit_choices', parameters: { type: 'object' } }],
+    agents: {
+      get: id => id === 'parent-1' ? { id: 'parent-1', session: { header: { cwd: '/tmp', delegationDepth: 0 } } } : undefined,
+      async resume(options) {
+        assert.equal(options.resumeSessionId, bgSession.id)
+        return this.create(options)
+      },
+      async create(options) {
+        registered.clear()
+        await options.setup({
+          systemPrompt: { section() {}, suppressRuntimeContext() {} },
+          on() {},
+          tools: { restrict() {}, register(tool) { registered.set(tool.name, tool); return () => registered.delete(tool.name) } }
+        })
+        return {
+          agent: {
+            session: bgSession,
+            phase: { kind: 'idle', lastTurn: 1 },
+            followup(message) {
+              work = (async () => {
+                const turn = (bgSession.events.filter(e => e.type === 'turn/start').at(-1)?.data?.turn || 1) + 1
+                bgSession.append('turn/start', { turn })
+                bgSession.append('step/start', { turn, step: 1 })
+                bgSession.append('user/message', message, { surfaceOp: 'append' })
+                requestSnapshots.push(visibleSurfaceMessages(bgSession))
+                if (mode === 'no-tool') {
+                  bgSession.append('assistant/message', {
+                    turn, step: 1,
+                    message: { id: 'a-notool', role: 'assistant', source: { kind: 'model', provider: 'test', model: 'no-tool' }, content: [{ type: 'text', text: '{"actors":[]}' }] }
+                  }, { surfaceOp: 'append' })
+                  bgSession.append('step/end', { turn, step: 1 })
+                  bgSession.append('turn/end', { turn, reason: { kind: 'completed' } })
+                } else if (mode === 'error') {
+                  bgSession.append('assistant/message', {
+                    turn, step: 1,
+                    message: { id: 'a-err', role: 'assistant', source: { kind: 'model', provider: 'test', model: 'err' }, content: [{ type: 'text', text: '半截失败输出' }] }
+                  }, { surfaceOp: 'append' })
+                  bgSession.append('step/end', { turn, step: 1 })
+                  bgSession.append('turn/end', { turn, reason: { kind: 'error', error: { message: 'upstream timeout' } } })
+                } else {
+                  const res = await registered.get('candidate_submit_choices').execute({
+                    actions: ['她端起拿铁抿了一口掩饰紧张', '她捏紧风衣腰带低头盯着鞋尖', '你推开咖啡店门走到靠窗桌前', '你俯身凑近低声调侃她的项圈'],
+                    scene: '两人匆匆离开咖啡店前往街角钟点房'
+                  }, { concludeTurn() {} })
+                  assert.equal(JSON.parse(res).ok, true)
+                  bgSession.append('assistant/message', {
+                    turn, step: 1,
+                    message: { id: 'a-tool-' + turn, role: 'assistant', source: { kind: 'model', provider: 'test', model: 'tool' }, content: [{ type: 'tool-call', name: 'candidate_submit_choices', id: 'c-' + turn, arguments: {} }] }
+                  }, { surfaceOp: 'append' })
+                  bgSession.append('step/end', { turn, step: 1 })
+                  bgSession.append('turn/end', { turn, reason: { kind: 'completed' } })
+                }
+              })()
+            },
+            async whenIdle() { await work }
+          },
+          async dispose() {}
+        }
+      }
+    }
+  })
+
+  const candidates = createCandidateGenerator({
+    store, timeline, tasks, prompt,
+    scripts: {},
+    planner: { async plan() { return { taskText: 'STORY_CANDIDATE_RULES', stableText: 'STABLE', dynamicText: '' } } },
+    model: { selection: () => ({ provider: 'test', model: 'mock' }), runCandidate: runner.run },
+    backgroundTasks: async () => ({ characterDesign: false }),
+    now: () => 123456,
+    logger: { error() {}, warn() {} }
+  })
+
+  try {
+    // 第 1 次：模型不支持工具，未调用 candidate_submit_choices -> validating 失败
+    await assert.rejects(() => candidates.generate({ sessionId: 'parent-1', messageId: 'm-1' }), /candidate_submit_choices/)
+    const op1 = Object.values(chat.timeline.operations).at(-1)
+    assert.equal(op1.status, 'failed', '校验失败不能错误标记为 completed')
+    assert.equal(chat.timeline.participants.background.status, 'needs-rewind')
+    assert.equal(chat.timeline.participants.background.rewindTo, -1)
+
+    // 第 2 次：模型在 generating 阶段超时报错 -> 同样必须保持 needs-rewind 到 -1
+    mode = 'error'
+    await assert.rejects(() => candidates.generate({ sessionId: 'parent-1', messageId: 'm-1' }), /upstream timeout/)
+    assert.equal(requestSnapshots[1].filter(m => m.role === 'user').length, 1, '第 2 次请求不得看到第 1 次失败的上下文')
+    assert.equal(requestSnapshots[1].some(m => m.text?.includes('{"actors":[]}')), false, '第 1 次失败的纯文本回复必须已被回退隐藏')
+    assert.equal(requestSnapshots[1][0].role, 'prefix', '固定前缀必须保留')
+    assert.equal(chat.timeline.participants.background.status, 'needs-rewind')
+    assert.equal(chat.timeline.participants.background.rewindTo, -1)
+
+    // 第 3 次：换支持工具的模型重试成功
+    mode = 'tool-ok'
+    const ok1 = await candidates.generate({ sessionId: 'parent-1', messageId: 'm-1' })
+    assert.equal(ok1.choices.length, 5)
+    assert.equal(requestSnapshots[2].filter(m => m.role === 'user').length, 1, '第 3 次请求不得残留前两次失败的上下文')
+    assert.equal(requestSnapshots[2].some(m => m.text?.includes('半截失败输出')), false)
+    assert.equal(requestSnapshots[2][0].role, 'prefix')
+    assert.equal(chat.timeline.participants.background.status, 'current')
+    assert.equal(chat.timeline.participants.background.candidateBaseBoundary, -1)
+
+    // 第 4 次：同一选择点再次点击重新生成候选项 -> 上一次成功的候选项也不得无限叠加
+    mode = 'tool-ok-2'
+    const ok2 = await candidates.generate({ sessionId: 'parent-1', messageId: 'm-1', guidance: '换个视角' })
+    assert.equal(ok2.choices.length, 5)
+    assert.equal(requestSnapshots[3].filter(m => m.role === 'user').length, 1, '再次生成候选项时不得叠加上一次候选项的重复正文')
+    assert.equal(requestSnapshots[3].filter(m => m.role === 'assistant').length, 0)
+    assert.equal(requestSnapshots[3][0].role, 'prefix')
+  } finally {
+    await runner.dispose()
+  }
+})
+
+test('前置结算边界在候选失败、重生成与后续结算时被精准保留，压缩后安全降级为 -1', async () => {
+  let seq = 0
+  const timeline = createStoryTimeline({ id: prefix => prefix + '-' + (++seq), now: () => 1000 + seq })
+  let chat = timeline.apply({
+    chat: { id: 'c', sessionId: 's', mode: 'story', messages: [{ role: 'assistant', turn: 1, text: '正文' }] },
+    intent: { kind: 'ensure' }
+  }).chat
+
+  // 1) 前置结算成功，确定安全基线 boundary = 12
+  const settle1 = timeline.apply({ chat, intent: { kind: 'agent.begin', role: 'settlement' } })
+  chat = timeline.apply({ chat: settle1.chat, intent: { kind: 'agent.bind', operationId: settle1.value.operationId, sessionId: 'bg-1' } }).chat
+  chat = timeline.complete({
+    chat, operationId: settle1.value.operationId, basedOn: settle1.value.basedOn,
+    outcome: { status: 'success', stateChanged: false, participant: { sessionId: 'bg-1', lifetime: 'chat', boundary: 12, formatVersion: 4 } }
+  }).chat
+  assert.equal(chat.timeline.participants.background.boundary, 12)
+
+  // 2) 候选项生成失败 -> 标记 needs-rewind 到前置结算边界 12（不误清前置结算）
+  const candFail = timeline.apply({ chat, intent: { kind: 'agent.begin', role: 'candidate' } })
+  chat = timeline.apply({ chat: candFail.chat, intent: { kind: 'agent.bind', operationId: candFail.value.operationId, sessionId: 'bg-1' } }).chat
+  chat = timeline.complete({
+    chat, operationId: candFail.value.operationId, basedOn: candFail.value.basedOn,
+    outcome: { status: 'failed', stateChanged: false, participant: { sessionId: 'bg-1', lifetime: 'chat', boundary: 18, formatVersion: 4 } }
+  }).chat
+  assert.equal(chat.timeline.participants.background.status, 'needs-rewind')
+  assert.equal(chat.timeline.participants.background.rewindTo, 12)
+
+  // 3) 候选项重试成功 -> 拿到 rewindTo=12，成功后保留 candidateBaseBoundary=12
+  const candOk = timeline.apply({ chat, intent: { kind: 'agent.begin', role: 'candidate' } })
+  assert.equal(candOk.value.participant.rewindTo, 12)
+  chat = timeline.apply({ chat: candOk.chat, intent: { kind: 'agent.bind', operationId: candOk.value.operationId, sessionId: 'bg-1' } }).chat
+  chat = timeline.complete({
+    chat, operationId: candOk.value.operationId, basedOn: candOk.value.basedOn,
+    outcome: { status: 'success', stateChanged: false, participant: { sessionId: 'bg-1', lifetime: 'chat', boundary: 20, formatVersion: 4 } }
+  }).chat
+  assert.equal(chat.timeline.participants.background.status, 'current')
+  assert.equal(chat.timeline.participants.background.boundary, 20)
+  assert.equal(chat.timeline.participants.background.candidateBaseBoundary, 12)
+
+  // 4) 紧接一轮新的结算或候选项都会拿到 rewindTo=12，从而只替换临时候选而不伤及 boundary=12
+  const candNext = timeline.apply({ chat, intent: { kind: 'agent.begin', role: 'candidate' } })
+  assert.equal(candNext.value.participant.rewindTo, 12)
+  // 若执行期间被中断恢复，也同样回到 12
+  chat = timeline.apply({ chat: candNext.chat, intent: { kind: 'agent.bind', operationId: candNext.value.operationId, sessionId: 'bg-1' } }).chat
+  chat = timeline.apply({ chat, intent: { kind: 'background.recover', operationId: candNext.value.operationId } }).chat
+  assert.equal(chat.timeline.participants.background.status, 'needs-rewind')
+  assert.equal(chat.timeline.participants.background.rewindTo, 12)
+
+  // 5) 压缩之后旧边界 12 不再可用，必须自动降级为 -1
+  markCompactedParticipant(chat.timeline.participants.background, 9999)
+  const afterCompact = timeline.apply({ chat, intent: { kind: 'agent.begin', role: 'candidate' } })
+  assert.equal(afterCompact.value.participant.rewindTo, -1)
+  assert.equal(afterCompact.value.participant.formatVersion, 4)
 })

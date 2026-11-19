@@ -45,7 +45,7 @@ export function createPolishDraft(texts, onChange = () => {}) {
 }
 
 /** Native child history survives idle disposal/restart. Only new material is appended. */
-export function createPolishReviewer({ latestFloors, readCard, prompt, runAgent, selection, data }) {
+export function createPolishReviewer({ latestFloors, readCard, prompt, runAgent, selection, data, withForegroundAgent = (_id, work) => work() }) {
   const queues = new Map(), progress = new Map()
   async function run(sessionId, texts, guidance, signal) {
     signal?.throwIfAborted()
@@ -102,56 +102,58 @@ export function createPolishReviewer({ latestFloors, readCard, prompt, runAgent,
     const draft = createPolishDraft(texts, edits => { status.edits = edits.map(edit => ({ ...edit })) })
     try {
       await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
-      const runSelection = await selection(sessionId)
-      const executeReview = async (rewindTo, rewindFormatVersion) => {
-        continued = false
-        return await runAgent({
-          task: 'polish', sessionId, persistent: true, persistentSessionId: reusable ? previous.traceSessionId : '', newSession: !reusable,
-          ...(rewindTo !== undefined ? { rewindTo, rewindFormatVersion: rewindFormatVersion || 4 } : {}),
-          selection: runSelection, signal, system, webSearchEnabled: false,
-          tools: POLISH_TOOLS, maxToolCalls: 32, toolLimitMessage: '精修调用次数已达上限，请结束任务。',
-          onToolCall: call => draft.call(call), stopToolsWhen: () => draft.finished, acceptWithoutText: () => draft.finished,
-          async onPersistentSessionReady(id) {
-            continued = Boolean(reusable && id === previous.traceSessionId)
-            if (!continued) delete state.lastCompleted
-            state.traceSessionId = id; status.traceSessionId = id
-            await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
-          },
-          taskText: () => {
-            const sections = []
-            const base = activeBase()
-            const linear = isLinear(base)
-            if (base && linear && floor === base.floor) {
-              sections.push('仍是同一轮；以此前提交的' + (hash(body) === base.original ? '原文' : '精修草稿') + '作为本次原文，重新开始一份独立草稿。')
-            } else if (base && linear) {
-              sections.push('上一轮实际采用' + (hash(context.previous) === base.original ? '此前输入的原文（未应用精修草稿）' : '此前的精修草稿') + '。')
-            } else {
-              if (base) sections.push(promptSection('story_changed', '此前审过的内容可能已被回退、重写，或上次没有审完；以下面的前文和本轮正文为准。'))
-              if (context.previous) sections.push(promptSection('previous_body', context.previous.slice(-3000)))
-            }
-            sections.push(promptSection('turn_reminder', (guidance ? '本轮只按玩家意见修改，不额外扩展原则精修。' : '按固定前缀中的完整精修原则审读本轮正文，只改明确的问题。') +
-              '保留剧情事实、力量等级、人物意图和有效信息；不要把正常比喻当作错误，不为改而改，不补造情节。每处修改调用 polish_edit；没有必要修改就直接调用 polish_finish。'))
-            // Always give the current target verbatim, including guided passes after compaction.
-            sections.push(promptSection('turn_body', body))
-            if (context.input) sections.push(promptSection('turn_input', context.input.slice(0, 2000)))
-            sections.push(promptSection('polish_task', guidance ? '只按意见修改：' + guidance.slice(0, 1000) : '原则精修'))
-            return sections.join('\n\n')
-          }
-        })
-      }
-      let result
-      try {
-        result = await executeReview(rewindBoundary, previousCompleted?.formatVersion || 4)
-      } catch (error) {
+      const result = await withForegroundAgent(sessionId, async () => {
         signal?.throwIfAborted()
-        if (error?.code === 'BACKGROUND_REWIND_FAILED' && rewindBoundary !== undefined && rewindBoundary !== -1) {
-          delete state.lastCompleted
-          await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
-          result = await executeReview(-1, 4)
-        } else {
+        const model = await selection(sessionId)
+        signal?.throwIfAborted()
+        const executeReview = async (rewindTo, rewindFormatVersion) => {
+          continued = false
+          return await runAgent({
+            task: 'polish', sessionId, persistent: true, persistentSessionId: reusable ? previous.traceSessionId : '', newSession: !reusable,
+            ...(rewindTo !== undefined ? { rewindTo, rewindFormatVersion: rewindFormatVersion || 4 } : {}),
+            selection: model, signal, system, webSearchEnabled: false,
+            tools: POLISH_TOOLS, maxToolCalls: 32, toolLimitMessage: '精修调用次数已达上限，请结束任务。',
+            onToolCall: call => draft.call(call), stopToolsWhen: () => draft.finished, acceptWithoutText: () => draft.finished,
+            async onPersistentSessionReady(id) {
+              continued = Boolean(reusable && id === previous.traceSessionId)
+              if (!continued) delete state.lastCompleted
+              state.traceSessionId = id; status.traceSessionId = id
+              await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
+            },
+            taskText: () => {
+              const sections = []
+              const base = activeBase()
+              const linear = isLinear(base)
+              if (base && linear && floor === base.floor) {
+                sections.push('仍是同一轮；以此前提交的' + (hash(body) === base.original ? '原文' : '精修草稿') + '作为本次原文，重新开始一份独立草稿。')
+              } else if (base && linear) {
+                sections.push('上一轮实际采用' + (hash(context.previous) === base.original ? '此前输入的原文（未应用精修草稿）' : '此前的精修草稿') + '。')
+              } else {
+                if (base) sections.push(promptSection('story_changed', '此前审过的内容可能已被回退、重写，或上次没有审完；以下面的前文和本轮正文为准。'))
+                if (context.previous) sections.push(promptSection('previous_body', context.previous.slice(-3000)))
+              }
+              sections.push(promptSection('turn_reminder', (guidance ? '本轮只按玩家意见修改，不额外扩展原则精修。' : '按固定前缀中的完整精修原则审读本轮正文，只改明确的问题。') +
+                '保留剧情事实、力量等级、人物意图和有效信息；不要把正常比喻当作错误，不为改而改，不补造情节。每处修改调用 polish_edit；没有必要修改就直接调用 polish_finish。'))
+              // Always give the current target verbatim, including guided passes after compaction.
+              sections.push(promptSection('turn_body', body))
+              if (context.input) sections.push(promptSection('turn_input', context.input.slice(0, 2000)))
+              sections.push(promptSection('polish_task', guidance ? '只按意见修改：' + guidance.slice(0, 1000) : '原则精修'))
+              return sections.join('\n\n')
+            }
+          })
+        }
+        try {
+          return await executeReview(rewindBoundary, previousCompleted?.formatVersion || 4)
+        } catch (error) {
+          signal?.throwIfAborted()
+          if (error?.code === 'BACKGROUND_REWIND_FAILED' && rewindBoundary !== undefined && rewindBoundary !== -1) {
+            delete state.lastCompleted
+            await data.saveGame({ chatId: chat.id, owner: OWNER, data: state })
+            return await executeReview(-1, 4)
+          }
           throw error
         }
-      }
+      })
       signal?.throwIfAborted()
       if (!draft.finished) throw new Error('精修 Agent 未调用完成工具，草稿未保存，请重试')
       const reviewed = draft.result()

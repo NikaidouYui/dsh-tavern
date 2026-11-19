@@ -410,9 +410,17 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
   const regenerationFrames = new Map()
   const REGENERATION_FRAME_CACHE_LIMIT = 8
   const regenerationRecovery = createRegenerationRecovery({ chats, sessions, timeline, isActive: id => pendingRegenerations.has(id) })
+  const acquireBackgroundSession = sessions.acquireBackground || sessions.acquire
   const regenerateWithProvider = createPluginBodyRegeneration({ chats, sessions, scripts, timeline, queueSettlement, replyCommitted, cancelSettlement,
     sessionPatch, readRegenerationMaterials, prepareRegenerationReply, notifyRegeneration,
-    recovery: regenerationRecovery, pendingRegenerations, pendingRollbacks, selectTarget: selectRegenerationTarget })
+    recovery: regenerationRecovery, acquireAgent: acquireRegenerationAgent, pendingRegenerations, pendingRollbacks, selectTarget: selectRegenerationTarget })
+
+  async function acquireRegenerationAgent(sessionId) {
+    if (sessions.acquire) return sessions.acquire(sessionId, { requireAgent: true })
+    const agent = sessions.get(sessionId)
+    if (!agent?.session && typeof sessions.resume === 'function') return sessions.resume(sessionId)
+    return { agent, async dispose() {} }
+  }
 
   // The save adopts the new body even when the native surface cannot place it
   // (ownership mismatch, old body gone): completion then repairs the native tail
@@ -539,15 +547,11 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     const storedSessionId = chat.sessionId
     if (typeof sessionId === 'string' && sessionId !== '') chat.sessionId = sessionId
     if (typeof chat.sessionId !== 'string' || chat.sessionId === '') throw new Error('会话未绑定 DSH 会话')
-    const effectiveSessionId = chat.sessionId
-    const activeAgent = sessions.get(effectiveSessionId)
-    const restoredHandle = !activeAgent?.session && typeof sessions.resume === 'function'
-      ? await sessions.resume(effectiveSessionId) : undefined
+    const handle = await acquireRegenerationAgent(chat.sessionId)
     try {
-      return await regenerateInSession(chat, card, storedSessionId, sessionId, activeRound, guidance, options,
-        restoredHandle?.agent || activeAgent)
+      return await regenerateInSession(chat, card, storedSessionId, sessionId, activeRound, guidance, options, handle.agent)
     } finally {
-      await restoredHandle?.dispose?.()
+      await handle.dispose()
     }
   }
 
@@ -1051,8 +1055,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     pendingRollbacks.add(chat.id)
     let restoredHandle
     try {
-      if (!sessions.get(chat.sessionId)?.session && !sessions.getSession?.(chat.sessionId) && typeof sessions.resume === 'function') {
-        restoredHandle = await sessions.resume(chat.sessionId)
+      if (sessions.acquire || (!sessions.get(chat.sessionId)?.session && !sessions.getSession?.(chat.sessionId) && typeof sessions.resume === 'function')) {
+        restoredHandle = await (sessions.acquire || sessions.resume)(chat.sessionId)
       }
       return await rollbackChat(chat, expectedTurn, restoredHandle?.agent, failedTailOnly)
     } finally {
@@ -1114,8 +1118,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     pendingRollbacks.add(state.id)
     let restoredHandle
     try {
-      if (!sessions.get(state.sessionId)?.session && !sessions.getSession?.(state.sessionId) && typeof sessions.resume === 'function') {
-        restoredHandle = await sessions.resume(state.sessionId)
+      if (sessions.acquire || (!sessions.get(state.sessionId)?.session && !sessions.getSession?.(state.sessionId) && typeof sessions.resume === 'function')) {
+        restoredHandle = await (sessions.acquire || sessions.resume)(state.sessionId)
       }
       if (messageUid !== undefined) {
         const chat = await readChat(state.id)
@@ -1586,8 +1590,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     let agent = sessions.get(chat.sessionId)
     let session = agent?.session || sessions.getSession?.(chat.sessionId)
     try {
-      if (!session && typeof sessions.resume === 'function') {
-        restoredHandle = await sessions.resume(chat.sessionId)
+      if (sessions.acquire || (!session && typeof sessions.resume === 'function')) {
+        restoredHandle = await (sessions.acquire || sessions.resume)(chat.sessionId)
         agent = restoredHandle.agent
         session = agent?.session
       }
@@ -1793,8 +1797,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
       try {
         let worker = sessions.get(participant.sessionId)
         let background = worker?.session || sessions.getSession?.(participant.sessionId)
-        if (!background && typeof sessions.resume === 'function') {
-          restoredHandle = await sessions.resume(participant.sessionId)
+        if (acquireBackgroundSession || (!background && typeof sessions.resume === 'function')) {
+          restoredHandle = await (acquireBackgroundSession || sessions.resume)(participant.sessionId)
           worker = restoredHandle.agent
           background = worker?.session
         }
@@ -1900,8 +1904,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
     try {
       let agent = sessions.get(chat.sessionId)
       let session = agent?.session || sessions.getSession?.(chat.sessionId)
-      if (!session && typeof sessions.resume === 'function') {
-        const handle = await sessions.resume(chat.sessionId)
+      if (sessions.acquire || (!session && typeof sessions.resume === 'function')) {
+        const handle = await (sessions.acquire || sessions.resume)(chat.sessionId)
         handles.push(handle)
         agent = handle.agent
         session = agent?.session
@@ -1914,8 +1918,8 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
       for (const checkpoint of saved.background) {
         let worker = sessions.get(checkpoint.sessionId)
         let background = worker?.session || sessions.getSession?.(checkpoint.sessionId)
-        if (!background && sessions.resume) {
-          const handle = await sessions.resume(checkpoint.sessionId)
+        if (acquireBackgroundSession || (!background && sessions.resume)) {
+          const handle = await (acquireBackgroundSession || sessions.resume)(checkpoint.sessionId)
           handles.push(handle); worker = handle.agent; background = worker?.session
         }
         if (!background || worker?.phase?.kind === 'running' || !unchangedSinceRollback(background, checkpoint.afterCount, checkpoint.formatVersion || 3)) throw new Error('后台上下文已有变化，不能撤销回退')
@@ -1987,8 +1991,12 @@ export function createRoundHistory({ chats, sessions, scripts, timeline, queueSe
       }
       throw error
     } finally {
-      pendingRollbacks.delete(chat.id)
-      for (const handle of handles) await handle.dispose()
+      try {
+        for (const handle of handles) {
+          try { await handle.dispose() }
+          catch (error) { console.warn('dsh-tavern: 释放撤销回退会话句柄失败:', handle.agent?.session?.id, str(error?.message || error)) }
+        }
+      } finally { pendingRollbacks.delete(chat.id) }
     }
   }
 

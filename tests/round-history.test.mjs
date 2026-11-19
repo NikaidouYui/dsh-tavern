@@ -1,3 +1,4 @@
+import { acquireHostSession, withHostSession } from '../tavern-plugin/lib/host/sessions.js'
 import { readFile, writeFile } from 'node:fs/promises'
 import { clearFailedTurnSurface } from '../tavern-plugin/lib/domain/rollback-surface.js'
 import assert from 'node:assert/strict'
@@ -120,6 +121,27 @@ test('regeneration resumes and releases a nonresident foreground Agent', async (
   assert.equal(result.adopted.text, '新正文3')
   assert.ok(h.calls.indexOf('resume') < h.calls.indexOf('followup'))
   assert.equal(h.calls.at(-1), 'dispose')
+})
+
+test('regeneration resumes an Agent when only the Session is in the live store', async () => {
+  const h = harness()
+  let resumes = 0, disposed = 0
+  const host = { sessions: { get: () => h.session }, agents: {
+    get() {},
+    async resume() {
+      resumes++
+      return { agent: h.agent, async dispose() { disposed++ } }
+    }
+  } }
+  h.options.sessions = {
+    get: host.agents.get,
+    getSession: host.sessions.get,
+    acquire: (id, options) => acquireHostSession(host, id, options)
+  }
+  const result = await h.create().regenerate('chat', '', 'session')
+  assert.equal(result.adopted.text, '新正文3')
+  assert.equal(resumes, 1)
+  assert.equal(disposed, 1)
 })
 
 for (const stored of [true, false]) test('rollback after foreground Agent release, stored Session=' + stored, async () => {
@@ -877,6 +899,53 @@ for (const mutation of ['resume', 'turn/start', 'surface']) test(`撤销回退�
   }
 })
 
+for (const saveFails of [false, true]) test(`撤销回退逐个释放会话并保留存档结果：saveFails=${saveFails}`, async t => {
+  const h = harness({ checkpoint: true, journal: true })
+  const background = harness().session
+  background.id = 'bg'
+  const worker = { session: background, phase: { kind: 'idle' }, async whenIdle() {} }
+  const participant = { role: 'background', lifetime: 'chat', sessionId: 'bg', boundary: 0, status: 'current', branchId: h.chat.timeline.branchId }
+  h.chat.timeline.checkpoints[0].participants = { background: participant }
+  h.chat.timeline.participants.background = participant
+  const live = new Map([['session', h.agent], ['bg', worker]])
+  const released = []
+  const teardownError = new Error('foreground close reported a failure')
+  const writeError = new Error('undo save failed')
+  const warnings = t.mock.method(console, 'warn', () => {})
+  const host = { sessions: { get: id => live.get(id)?.session }, agents: {
+    get: id => live.get(id),
+    async resume({ resumeSessionId }) {
+      const agent = resumeSessionId === 'bg' ? worker : h.agent
+      live.set(resumeSessionId, agent)
+      return { agent, async dispose() {
+        live.delete(resumeSessionId)
+        released.push(resumeSessionId)
+        if (resumeSessionId === 'session') throw teardownError
+      } }
+    }
+  } }
+  h.options.sessions = {
+    get: host.agents.get, getSession: host.sessions.get,
+    acquire: (id, options) => acquireHostSession(host, id, options), flush: async () => {}
+  }
+  const update = h.options.chats.update
+  h.options.chats.update = async (id, apply, metadata) => {
+    if (saveFails && metadata?.source === 'rollback.undo') throw writeError
+    return update(id, apply, metadata)
+  }
+  const history = h.create()
+  await history.rollback('session', 'chat', 2)
+  assert.equal(h.chat.rollbackUndo.background.length, 1)
+  live.clear()
+
+  if (saveFails) await assert.rejects(history.undoRollback('session', 'chat'), error => error === writeError)
+  else assert.equal((await history.undoRollback('session', 'chat')).undoneRollback.turn, 2)
+  assert.equal(h.chat.messages.length, saveFails ? 1 : 3)
+  assert.deepEqual(released, ['session', 'bg'])
+  assert.equal(live.size, 0)
+  assert.ok(warnings.mock.calls.some(({ arguments: args }) => args.includes(teardownError.message)))
+})
+
 for (const legacy of [false, true]) test('中断重生成后重建模块仍不恢复旧正文：legacy=' + legacy, async () => {
   const h = harness({ checkpoint: true, journal: true })
   const before = structuredClone(h.chat)
@@ -954,6 +1023,55 @@ test('另一进程留下的重生成标志清理后仍可回退该轮（包含�
   assert.equal(h.chat.failedRegenerationTarget, undefined)
   assert.equal(h.chat.messages.length, original.length - 2)
   assert.equal(h.chat.posture, '门外')
+})
+
+test('rollback shares and retains the cold writer while recovering an interrupted regeneration', async () => {
+  const { h } = await interruptedRegeneration()
+  const opening = Promise.withResolvers(), publish = Promise.withResolvers(), recovering = Promise.withResolvers()
+  let loaded = false, writer = false, resumes = 0, flushes = 0
+  const host = { sessions: { get: () => loaded ? h.session : undefined }, agents: {
+    get: () => loaded ? h.agent : undefined,
+    async resume() {
+      assert.equal(writer, false)
+      writer = true
+      resumes++
+      opening.resolve()
+      await publish.promise
+      loaded = true
+      return { agent: h.agent, async dispose() { loaded = false; writer = false } }
+    }
+  } }
+  const reader = withHostSession(host, 'session', () => {})
+  await opening.promise
+  h.options.sessions = {
+    get: host.agents.get,
+    getSession: host.sessions.get,
+    acquire(id, options) {
+      const handle = acquireHostSession(host, id, options)
+      recovering.resolve()
+      return handle
+    },
+    resume() { assert.fail('recovery must use the shared acquisition') },
+    async flush() {
+      await reader
+      assert.equal(writer, true)
+      flushes++
+    }
+  }
+  const rollback = h.create().rollback('session', 'chat')
+  try {
+    await Promise.race([recovering.promise, rollback])
+    publish.resolve()
+    const view = await rollback
+    assert.ok(view.rolledBack)
+    assert.ok(!h.chat.regenInProgress)
+    assert.ok(flushes >= 1)
+  } finally {
+    publish.resolve()
+    await reader
+  }
+  assert.equal(writer, false)
+  assert.equal(resumes, 2, 'one shared resume for recovery and one after recovery releases it for rollback')
 })
 
 test('重新生成准备缓存命中后跳过重新组建，但仍发送模型请求', async () => {
@@ -1608,3 +1726,38 @@ test('失败尾或清除截断回复后直接原生重生成，清理前序孤�
 })
 
 
+test('rollback and undo retain the shared writer while a cold-session reader is in flight', async () => {
+  const h = harness({ checkpoint: true, journal: true })
+  let loaded = false, writer = false, resumes = 0, disposed = 0
+  let publish, finish
+  const publishing = new Promise(resolve => { publish = resolve })
+  const finishing = new Promise(resolve => { finish = resolve })
+  const host = { sessions: { get: () => loaded ? h.session : undefined }, agents: {
+    get: () => loaded ? h.agent : undefined,
+    async resume() {
+      if (writer) throw new Error('session "session" is already owned by an active write handle')
+      writer = true; resumes++
+      await publishing
+      loaded = true
+      return { agent: h.agent, async dispose() { loaded = false; writer = false; disposed++ } }
+    }
+  } }
+  h.options.sessions.get = host.agents.get
+  h.options.sessions.getSession = host.sessions.get
+  h.options.sessions.acquire = id => acquireHostSession(host, id)
+  h.options.sessions.resume = () => assert.fail('rollback must use the shared acquisition')
+  const reader = withHostSession(host, 'session', () => finishing)
+  const history = h.create()
+  const rollback = history.rollback('session', 'chat', 2)
+  publish()
+  try {
+    await rollback
+    assert.equal(h.chat.messages.length, 1)
+    assert.equal(disposed, 0)
+    await history.undoRollback('session', 'chat')
+    assert.equal(h.chat.messages.length, 3)
+    assert.equal(disposed, 0)
+    assert.equal(resumes, 1)
+  } finally { finish(); await reader }
+  assert.equal(disposed, 1)
+})
